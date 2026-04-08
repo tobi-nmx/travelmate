@@ -125,7 +125,10 @@ ONLINE_SIGNATURES = {
     'http://www.msftncsi.com/ncsi.txt':                  'Microsoft NCSI',
 }
 
-TIMEOUT = 15
+TIMEOUT       = 15   # timeout for login form requests
+PROBE_TIMEOUT = 5    # shorter timeout for portal detection probes
+                     # (already-online case should respond in <1s;
+                     #  if it takes longer, try the next probe URL)
 
 HEADERS = {
     'User-Agent':      'Mozilla/5.0 (Linux; Android 11; OpenWrt) AppleWebKit/537.36',
@@ -247,7 +250,7 @@ def detect_portal():
     no_redir, _ = _make_opener(follow_redirects=False)
     for probe in PROBE_URLS:
         try:
-            resp = no_redir.open(probe, timeout=TIMEOUT)
+            resp = no_redir.open(probe, timeout=PROBE_TIMEOUT)
             body = resp.read().decode('utf-8', errors='replace')
             expected = ONLINE_SIGNATURES.get(probe)
             if expected is None:
