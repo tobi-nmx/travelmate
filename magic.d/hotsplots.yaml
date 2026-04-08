@@ -1,26 +1,21 @@
-# Hotsplots / BayernWLAN captive portal handler
+# Hotsplots captive portal handler
 # ─────────────────────────────────────────────────────────────────────────────
-# Hotsplots (hotsplots.net) is the portal platform used by BayernWLAN and
-# many other venues (restaurants, hotels, public transport).
+# Hotsplots (hotsplots.net) is a portal platform used by many venues:
+# restaurants, hotels, shopping centres and some public transport.
 #
-# BayernWLAN note: although Vodafone operates BayernWLAN in the background,
-# the captive portal itself runs on Hotsplots — NOT on Vodafone's own portal.
-# This handler covers both. vodafone.yaml only applies to Vodafone's own
-# commercial hotspots (VodafoneWifi* SSIDs) which require credentials.
+# Note on BayernWLAN: despite being operated by Vodafone in the background,
+# BayernWLAN runs its own captive portal (wlan-bayern.de) and is NOT based
+# on Hotsplots. A separate handler is needed for BayernWLAN — contributions
+# welcome (see README).
 #
-# Free portals (BayernWLAN, many venues): no credentials needed — the form
-# just has a checkbox to accept T&C. check_boxes: true handles that.
 # Credential-based portals: add entries to /etc/captive-credentials.conf:
-#   BayernWLAN*   free
-#   HotspotsVenue userpass  myuser  mypass
+#   HotspotsVenue   userpass   myuser   mypass
 
-name: Hotsplots / BayernWLAN
+name: Hotsplots
 priority: 20
 
 match:
   - hotsplots
-  - bayernwlan
-  - brombachsee-wifi
 
 retry_delays: [2, 3, 5, 5]
 
