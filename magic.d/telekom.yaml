@@ -1,0 +1,22 @@
+# Telekom Hotspot handler
+# ─────────────────────────────────────────────────────────────────────────────
+# Telekom hotspots (T-Online, hotspot.t-online.de, Telekom.de) use a
+# standard username+password form. Add credentials to
+# /etc/captive-credentials.conf:
+#   Telekom_FON_*   userpass   your@t-online.de   yourpassword
+
+name: Telekom Hotspot
+priority: 20
+
+match:
+  - t-online.de
+  - hotspot.t-
+  - telekom.de
+  - t-mobile
+
+retry_delays: [2, 3, 5, 5]
+
+steps:
+  - label:  login
+    action: from_form
+    fields: from_form

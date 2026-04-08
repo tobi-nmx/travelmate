@@ -1,0 +1,57 @@
+# free-key.eu captive portal handler
+# ─────────────────────────────────────────────────────────────────────────────
+# free-key is a German public WiFi platform used in many towns, venues and
+# public transport. The login flow is four POST steps plus a final router
+# login. All steps are driven by forms returned from service.free-key-de.eu.
+#
+# Portal flow:
+#   Step 1  hotspot.free-key.eu/login  →  POST router data to service.*
+#   Step 2  service.* returns FREEKEYWIFI token form  →  POST action=auth
+#   Step 3  service.* returns AGB/ToS form  →  POST AGB accepted
+#   Step 4  service.* returns router login form  →  POST to hotspot.*/login
+#   → Router authorizes the MAC address
+
+name: free-key.eu
+priority: 10   # checked before generic handler
+
+match:
+  - free-key.eu
+  - free-key-de.eu
+  - hotspot.free-key
+
+# retry_delays: seconds to wait between connectivity checks after the last step.
+# First check is fast (1s) since the router login is synchronous.
+retry_delays: [1, 2, 3, 5, 5, 5]
+
+steps:
+
+  # Step 1 — submit the router-supplied form (mac, ip, server-name, etc.)
+  #           to service.free-key-de.eu
+  - label:        router_post
+    action:       from_form
+    fields:       from_form
+    clear_fields: [link-orig]   # browser sends this empty; clear to match
+
+  # Step 2 — service.* returns a form with a FREEKEYWIFI session token and
+  #           action=auth. Submit it to proceed to the AGB page.
+  - label:    auth
+    action:   from_form
+    fields:   from_form
+    only_if:  FREEKEYWIFI   # only run if server included a FREEKEYWIFI token
+
+  # Step 3 — AGB / Terms of Service acceptance.
+  #           Tick all checkboxes (agb, privacy) and submit.
+  - label:       tos
+    action:      from_form
+    fields:      from_form
+    check_boxes: true         # automatically tick AGB / privacy checkboxes
+    only_if:     agb          # only run if the AGB form was returned
+
+  # Step 4 — final router login.
+  #           service.* returns a form POSTing username=<MAC>&password=freekey
+  #           back to hotspot.free-key.eu/login, which authorizes the MAC.
+  - label:          router_login
+    action:         from_form
+    fields:         from_form
+    only_if_action: hotspot   # only run when form action points back to hotspot.*
+
