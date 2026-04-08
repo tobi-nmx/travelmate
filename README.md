@@ -23,6 +23,7 @@
 |------|--------|-------|
 | `magic.d/freekey.yaml` | free-key.eu | German public WiFi, multi-step flow |
 | `magic.d/hotsplots.yaml` | Hotsplots | Venues, restaurants, hotels |
+| `magic.d/bayernwlan.yaml` | BayernWLAN (@BayernWLAN) | Free, T&C only, Vodafone-betrieben |
 | `magic.d/telekom.yaml` | Telekom Hotspot | Requires credentials |
 | `magic.d/vodafone.yaml` | Vodafone Hotspot | Requires credentials |
 | *(built-in)* | Deutsche Bahn ICE (Ombord) | MAC-based, no form |
