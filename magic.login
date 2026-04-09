@@ -6,9 +6,18 @@ Dependencies:
   python3-yaml  (opkg install python3-yaml)
 
 Usage:
-  magic.login [--debug]                         # free / checkbox portals
-  magic.login [--debug] <ticket>                # ticket / voucher portals
-  magic.login [--debug] <username> <password>   # username+password portals
+  magic.login [--debug] [--force]                         # free / checkbox portals
+  magic.login [--debug] [--force] <ticket>                # ticket / voucher portals
+  magic.login [--debug] [--force] <username> <password>   # username+password portals
+
+Flags:
+  --debug   Write detailed log and HTML dumps to /tmp/captive-debug/
+  --force   Skip the fast online pre-check and always run the full login flow
+
+Cron usage (re-login when session expires, e.g. every 5 minutes):
+  */5 * * * * /etc/travelmate/magic.login
+  The script exits in ~1s if already online (fast pre-check).
+  Use --force to always run the full login flow regardless.
 
 Handler configuration:
   YAML files in /etc/travelmate/captive.d/ describe portal-specific login flows.
@@ -31,9 +40,88 @@ Credentials file (/etc/captive-credentials.conf):
   *                      free
 """
 
-import sys, re, json, time, os, glob
+import sys
+import urllib.request
+import urllib.error
+
+# ── Fast online pre-check ─────────────────────────────────────────────────────
+# Runs before any heavy imports. Uses a raw socket-level HTTP request to avoid
+# the overhead of building a full opener. If we get a clean 204 or the expected
+# response without a redirect, we're online and exit immediately.
+# This keeps the "already online" path to ~1s even on slow MIPS hardware.
+
+def _fast_online_check():
+    """
+    Quick connectivity check using only stdlib primitives already loaded.
+    Returns True if internet access is confirmed, False otherwise.
+    Avoids importing re, yaml, glob, HTMLParser etc. for the fast path.
+
+    For each probe URL we verify:
+      - No redirect occurred (captive portals redirect to their login page)
+      - The response body matches exactly what the real server sends
+        generate_204: empty body (strictly 0 bytes)
+        detectportal: body contains the word 'success'
+    Any non-empty body on generate_204 means a portal intercepted the request
+    and returned its login page instead of a real 204.
+    """
+    checks = [
+        # (url, expected_body_or_None)
+        # None = expect HTTP 204 with strictly empty body
+        ('http://connectivitycheck.gstatic.com/generate_204', None),
+        ('http://detectportal.firefox.com/success.txt',       'success'),
+    ]
+    for url, expected in checks:
+        try:
+            req = urllib.request.Request(url)
+            req.add_header('User-Agent', 'magic.login/1.0')
+            resp = urllib.request.urlopen(req, timeout=3)
+            body = resp.read().decode('utf-8', errors='replace')
+            final = resp.geturl()
+
+            if final != url:
+                print('[fast-check] Redirected to %s — captive portal active' % final,
+                      flush=True)
+                return False
+
+            if expected is None:
+                # generate_204: real response is strictly empty
+                # Any content means a portal returned its login page
+                if body == '':
+                    return True
+                print('[fast-check] generate_204 returned %d bytes — portal intercept'
+                      % len(body), flush=True)
+                return False
+            else:
+                if expected in body:
+                    return True
+                print('[fast-check] Expected %r not in response — portal intercept'
+                      % expected, flush=True)
+                return False
+
+        except urllib.error.HTTPError as e:
+            # generate_204 returns 204 as a normal response, not HTTPError.
+            # An HTTPError here means something unexpected — treat as not online.
+            print('[fast-check] HTTP %d from %s' % (e.code, url), flush=True)
+        except Exception as e:
+            print('[fast-check] %s unreachable: %s' % (url, e), flush=True)
+
+    return False
+
+# Run early check before loading heavy modules.
+# Skip if --debug or --force flags are present (we want full output then).
+_ARGV = sys.argv[1:]
+_FORCE = '--force' in _ARGV
+_DEBUG = '--debug' in _ARGV
+
+if not _FORCE and not _DEBUG:
+    if _fast_online_check():
+        print('[*] Already online (fast check)', flush=True)
+        sys.exit(0)
+
+# Heavy imports — only reached if we might need to log in
+import re, json, time, os, glob
 import http.cookiejar
-import urllib.request, urllib.parse, urllib.error
+import urllib.parse
 from html.parser import HTMLParser
 
 try:
@@ -146,18 +234,20 @@ CREDS_FILE   = '/etc/captive-credentials.conf'
 
 def parse_args():
     global DEBUG
-    args = [a for a in sys.argv[1:] if a != '--debug']
-    if '--debug' in sys.argv:
+    args = [a for a in sys.argv[1:] if a not in ('--debug', '--force')]
+    if _DEBUG:
         DEBUG = True
         _init_debug()
         dbg('argv: %s' % sys.argv)
+    if _FORCE:
+        dbg('--force: skipping fast online check, running full login flow')
     if len(args) == 0:
         return None, None, None
     if len(args) == 1:
         return args[0], None, None
     if len(args) == 2:
         return None, args[0], args[1]
-    die('Usage: magic.login [--debug] [ticket | username password]')
+    die('Usage: magic.login [--debug] [--force] [ticket | username password]')
 
 # ── HTTP helpers ──────────────────────────────────────────────────────────────
 
