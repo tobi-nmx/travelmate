@@ -50,46 +50,110 @@ import urllib.error
 # response without a redirect, we're online and exit immediately.
 # This keeps the "already online" path to ~1s even on slow MIPS hardware.
 
+def _detect_uplink_iface():
+    """
+    Find the active Travelmate uplink interface name (e.g. phy1-sta0).
+    Reads /tmp/trm_runtime.json; falls back to scanning ip route for a
+    non-loopback, non-LAN default-like route via a sta* interface.
+    Returns the interface name string, or None if not found.
+    """
+    # Try Travelmate runtime JSON first
+    try:
+        with open('/tmp/trm_runtime.json') as f:
+            import json as _json
+            data = _json.load(f)
+        iface = (data.get('sta_iface')        # wwan (logical)
+                 or data.get('travelmate_iface')
+                 or data.get('iface'))
+        if iface:
+            return iface
+    except Exception:
+        pass
+
+    # Fall back: find sta* interface with a default or host route
+    try:
+        import subprocess as _sp
+        out = _sp.check_output(['ip', 'route', 'show'],
+                               stderr=_sp.DEVNULL).decode()
+        for line in out.splitlines():
+            # Look for lines like: "default via ... dev phy1-sta0 ..."
+            # or "10.x.x.x dev phy1-sta0 ..."
+            parts = line.split()
+            if 'dev' in parts:
+                dev = parts[parts.index('dev') + 1]
+                if 'sta' in dev or 'wwan' in dev:
+                    return dev
+    except Exception:
+        pass
+
+    return None
+
+
 def _fast_online_check():
     """
-    Quick connectivity check using only stdlib primitives already loaded.
-    Returns True if internet access is confirmed, False otherwise.
-    Avoids importing re, yaml, glob, HTMLParser etc. for the fast path.
+    Quick connectivity check via curl, bound to the Travelmate uplink interface.
+    Using curl (rather than urllib) allows --interface binding, which ensures
+    the check goes over the WiFi uplink even when LTE/mwan is also active.
 
-    For each probe URL we verify:
-      - No redirect occurred (captive portals redirect to their login page)
-      - The response body matches exactly what the real server sends
-        generate_204: empty body (strictly 0 bytes)
-        detectportal: body contains the word 'success'
-    Any non-empty body on generate_204 means a portal intercepted the request
-    and returned its login page instead of a real 204.
+    Returns True if internet access via the uplink interface is confirmed.
+
+    For generate_204 we require:
+      - HTTP 204 status code
+      - Strictly empty body (any content = portal login page intercept)
     """
+    import subprocess as _sp
+
+    iface = _detect_uplink_iface()
+    iface_args = ['--interface', iface] if iface else []
+    if iface:
+        print('[fast-check] Using interface: %s' % iface, flush=True)
+    else:
+        print('[fast-check] No uplink interface found — checking default route',
+              flush=True)
+
     checks = [
         # (url, expected_body_or_None)
         # None = expect HTTP 204 with strictly empty body
         ('http://connectivitycheck.gstatic.com/generate_204', None),
         ('http://detectportal.firefox.com/success.txt',       'success'),
     ]
+
     for url, expected in checks:
         try:
-            req = urllib.request.Request(url)
-            req.add_header('User-Agent', 'magic.login/1.0')
-            resp = urllib.request.urlopen(req, timeout=3)
-            body = resp.read().decode('utf-8', errors='replace')
-            final = resp.geturl()
+            cmd = (['curl', '--silent', '--max-time', '3',
+                    '--write-out', '%{http_code} %{url_effective}',
+                    '--output', '/tmp/magic_probe_body',
+                    '--location']          # follow redirects so we see final URL
+                   + iface_args + [url])
+            result = _sp.run(cmd, capture_output=True, text=True, timeout=5)
+            meta   = result.stdout.strip()   # "200 http://..."
+            try:
+                code_str, final = meta.split(' ', 1)
+                code = int(code_str)
+            except ValueError:
+                continue
 
-            if final != url:
+            try:
+                body = open('/tmp/magic_probe_body').read()
+            except Exception:
+                body = ''
+
+            # Redirect detected: final URL differs from probe URL
+            if final.rstrip('/') != url.rstrip('/'):
                 print('[fast-check] Redirected to %s — captive portal active' % final,
                       flush=True)
                 return False
 
             if expected is None:
-                # generate_204: real response is strictly empty
-                # Any content means a portal returned its login page
-                if body == '':
+                # generate_204: must be HTTP 204 with empty body
+                if code == 204 and body == '':
                     return True
-                print('[fast-check] generate_204 returned %d bytes — portal intercept'
-                      % len(body), flush=True)
+                if body:
+                    print('[fast-check] generate_204 returned %d bytes (HTTP %d) '
+                          '— portal intercept' % (len(body), code), flush=True)
+                else:
+                    print('[fast-check] generate_204 returned HTTP %d '
+                          '(expected 204)' % code, flush=True)
                 return False
             else:
                 if expected in body:
@@ -98,12 +162,8 @@ def _fast_online_check():
                       % expected, flush=True)
                 return False
 
-        except urllib.error.HTTPError as e:
-            # generate_204 returns 204 as a normal response, not HTTPError.
-            # An HTTPError here means something unexpected — treat as not online.
-            print('[fast-check] HTTP %d from %s' % (e.code, url), flush=True)
         except Exception as e:
-            print('[fast-check] %s unreachable: %s' % (url, e), flush=True)
+            print('[fast-check] %s: %s' % (url, e), flush=True)
 
     return False
 
@@ -255,6 +315,41 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
 
+
+class _BoundHTTPHandler(urllib.request.HTTPHandler):
+    """HTTP handler that binds the socket to a specific network interface.
+    Uses SO_BINDTODEVICE so traffic is forced over the uplink (e.g. phy1-sta0)
+    even when LTE/mwan provides a default route with lower metric."""
+
+    def __init__(self, iface, *args, **kwargs):
+        self._iface = iface.encode() if isinstance(iface, str) else iface
+        super().__init__(*args, **kwargs)
+
+    def http_open(self, req):
+        return self.do_open(self._make_conn, req)
+
+    def _make_conn(self, host, **kwargs):
+        import http.client as _hc, socket as _sock
+        conn = _hc.HTTPConnection(host, **kwargs)
+        # Patch connect() to bind before connecting
+        _iface = self._iface
+        _orig_connect = conn.connect
+        def _bound_connect():
+            _orig_connect()
+            try:
+                import socket as _s
+                conn.sock.setsockopt(
+                    _s.SOL_SOCKET, _s.SO_BINDTODEVICE, _iface + bytes(1))
+            except Exception:
+                pass   # non-fatal: falls back to default routing
+        conn.connect = _bound_connect
+        return conn
+
+
+# Active uplink interface — detected once at startup
+_UPLINK_IFACE = _detect_uplink_iface()
+
+
 def _make_jar():
     return http.cookiejar.CookieJar()
 
@@ -263,6 +358,9 @@ def _make_opener(jar=None, follow_redirects=True):
     handlers = [urllib.request.HTTPCookieProcessor(jar)]
     if not follow_redirects:
         handlers.append(_NoRedirect())
+    if _UPLINK_IFACE:
+        handlers.append(_BoundHTTPHandler(_UPLINK_IFACE))
+        dbg('Binding HTTP requests to interface: %s' % _UPLINK_IFACE)
     opener = urllib.request.build_opener(*handlers)
     opener.addheaders = list(HEADERS.items())
     return opener, jar
