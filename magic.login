@@ -659,27 +659,76 @@ def resolve_action(base_url, action):
 
 # ── YAML-driven handler engine ────────────────────────────────────────────────
 
+# Context dict injected into Python plugins so they can call core helpers
+# without importing magic.login (which would cause circular imports).
+def _make_plugin_ctx():
+    return {
+        'log':          log,
+        'dbg':          dbg,
+        'http_get':     http_get,
+        'http_post':    http_post,
+        '_make_opener': _make_opener,
+        '_connectivity_ok': _connectivity_ok,
+        'origin_of':    origin_of,
+        'json':         json,
+        'time':         time,
+        'urllib_parse': urllib.parse,
+        'urllib_error': urllib.error,
+    }
+
+
 def _load_handlers():
     """
-    Load all *.yaml files from HANDLERS_DIR.
-    Returns list of parsed handler dicts, sorted by 'priority' (default 50).
+    Load all *.yaml and *.py handler files from HANDLERS_DIR.
+    Returns a unified list sorted by priority (default 50).
+    Each entry is either:
+      - a dict  (YAML handler, run by _run_yaml_handler)
+      - a module (Python plugin, has can_handle() and handle())
     """
+    handlers = []
+
+    # ── YAML handlers ────────────────────────────────────────────────────────
     if yaml is None:
         log('[handlers] python3-yaml not available — YAML handlers disabled')
         log('[handlers] Install with: opkg install python3-yaml')
-        return []
-    handlers = []
-    pattern = os.path.join(HANDLERS_DIR, '*.yaml')
-    for path in sorted(glob.glob(pattern)):
+    else:
+        for path in sorted(glob.glob(os.path.join(HANDLERS_DIR, '*.yaml'))):
+            try:
+                with open(path) as f:
+                    h = yaml.safe_load(f)
+                if h and isinstance(h, dict):
+                    h['_file'] = path
+                    h['_type'] = 'yaml'
+                    handlers.append(h)
+                    dbg('Loaded YAML handler: %s (priority=%s)' % (
+                        path, h.get('priority', 50)))
+            except Exception as e:
+                log('[handlers] Could not load %s: %s' % (path, e))
+
+    # ── Python plugin handlers ────────────────────────────────────────────────
+    import importlib.util as _ilu
+    for path in sorted(glob.glob(os.path.join(HANDLERS_DIR, '*.py'))):
         try:
-            with open(path) as f:
-                h = yaml.safe_load(f)
-            if h and isinstance(h, dict):
-                h['_file'] = path
-                handlers.append(h)
-                dbg('Loaded handler: %s (priority=%s)' % (path, h.get('priority', 50)))
+            spec = _ilu.spec_from_file_location('magic_handler', path)
+            mod  = _ilu.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            if not (hasattr(mod, 'can_handle') and hasattr(mod, 'handle')):
+                log('[handlers] %s missing can_handle/handle — skipped' % path)
+                continue
+            # Inject core helpers
+            mod._ctx = _make_plugin_ctx()
+            # Wrap as a lightweight dict-like entry for the sort
+            handlers.append({
+                '_file':    path,
+                '_type':    'python',
+                '_module':  mod,
+                'priority': getattr(mod, 'PRIORITY', 50),
+            })
+            dbg('Loaded Python handler: %s (priority=%s)' % (
+                path, getattr(mod, 'PRIORITY', 50)))
         except Exception as e:
             log('[handlers] Could not load %s: %s' % (path, e))
+
     handlers.sort(key=lambda h: h.get('priority', 50))
     return handlers
 
@@ -829,50 +878,6 @@ def _run_yaml_handler(handler, portal_url, html, ticket, username, password):
     log('[%s] Login failed — not online after all retries' % name)
     return False
 
-# ── Built-in special handlers (require Python logic) ─────────────────────────
-
-def handle_ombord(portal_url, ticket=None):
-    """DB ICE (Ombord backend) — MAC-based, no form needed."""
-    log('[DB/Ombord] Logging in via Ombord CGI')
-    opener, _ = _make_opener()
-    venue_enc   = urllib.parse.quote(portal_url, safe='')
-    onerror_enc = urllib.parse.quote(portal_url + '?onerror=true', safe='')
-    login_url   = ('https://www.ombord.info/hotspot/hotspot.cgi?method=login'
-                   '&url=%s&onerror=%s' % (venue_enc, onerror_enc))
-    body, final, _ = http_get(login_url, opener=opener)
-    if body is None:
-        log('[DB/Ombord] Request failed')
-        return False
-    time.sleep(1)
-    info, _, _ = http_get('https://www.ombord.info/api/jsonp/user/', opener=opener)
-    if info and ('"authenticated":"1"' in info or "'authenticated':'1'" in info):
-        log('[DB/Ombord] Authenticated!')
-        return True
-    return body is not None
-
-def handle_db_cna(portal_url, ticket=None, username=None, password=None):
-    """DB CNA portal (stations / regional trains) — Vue SPA, REST API."""
-    log('[DB/CNA] Detected DB CNA portal')
-    base   = origin_of(portal_url)
-    opener, _ = _make_opener()
-    cfg_body, _, _ = http_get('%s/services/cna-portal/v1/config' % base, opener=opener)
-    api_type = 'local'
-    if cfg_body:
-        try:
-            api_type = json.loads(cfg_body).get('result', {}).get('api_type', 'local')
-            log('[DB/CNA] api_type = %s' % api_type)
-        except Exception:
-            pass
-    if api_type in ('ombord', 'emailreg'):
-        return handle_ombord(portal_url, ticket=ticket)
-    body, final, resp = http_post(
-        '%s/cna/logon' % base, '{}', opener=opener,
-        content_type='application/json',
-        extra_headers={'X-Real-IP':'192.168.64.0','X-Requested-With':'XMLHttpRequest',
-                       'X-Csrf-Token':'csrf','X-Reserve-Id':'1'},
-    )
-    return body is not None and not isinstance(resp, urllib.error.HTTPError)
-
 # ── Generic HTML-form handler (Python fallback) ───────────────────────────────
 
 def handle_generic(portal_url, html, ticket=None, username=None, password=None,
@@ -944,24 +949,26 @@ def handle_generic(portal_url, html, ticket=None, username=None, password=None,
 # ── Dispatcher ────────────────────────────────────────────────────────────────
 
 def dispatch(portal_url, html, ticket=None, username=None, password=None):
-    ul = portal_url.lower()
-    h  = (html or '').lower()
-
-    # 1. Built-in handlers that require Python logic
-    if 'ombord.info' in ul or 'ombord.info' in h:
-        return handle_ombord(portal_url, ticket=ticket)
-    if ('wifi.bahn.de' in ul or 'bahn.de' in ul
-            or 'cna-portal' in h or '/services/cna-portal/v1/' in h
-            or 'cna-portal-frontend' in h):
-        return handle_db_cna(portal_url, ticket=ticket, username=username, password=password)
-
-    # 2. YAML handlers from captive.d/
+    # Try all handlers from magic.d/ (both YAML and Python plugins),
+    # sorted by priority. Falls back to the built-in generic handler.
     for handler in _load_handlers():
-        if _handler_matches(handler, portal_url, html):
-            log('[dispatch] Matched YAML handler: %s' % handler.get('name', handler['_file']))
-            return _run_yaml_handler(handler, portal_url, html, ticket, username, password)
+        htype = handler.get('_type', 'yaml')
 
-    # 3. Generic Python fallback
+        if htype == 'python':
+            mod = handler['_module']
+            if mod.can_handle(portal_url, html):
+                log('[dispatch] Matched Python handler: %s' % handler['_file'])
+                return mod.handle(portal_url, html,
+                                  ticket=ticket, username=username,
+                                  password=password)
+
+        elif htype == 'yaml':
+            if _handler_matches(handler, portal_url, html):
+                log('[dispatch] Matched YAML handler: %s' % handler.get('name', handler['_file']))
+                return _run_yaml_handler(handler, portal_url, html,
+                                         ticket, username, password)
+
+    # Generic Python fallback
     log('[dispatch] No specific handler matched — using generic form handler')
     return handle_generic(portal_url, html, ticket=ticket,
                           username=username, password=password)
