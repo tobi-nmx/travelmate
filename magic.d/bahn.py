@@ -1,17 +1,20 @@
 # magic.d/bahn.py — Deutsche Bahn captive portal handler
 # ─────────────────────────────────────────────────────────────────────────────
-# Covers two distinct DB portal backends:
+# Covers three DB portal variants:
 #
-#   Ombord  — ICE trains (wifi.bahn.de frontend, ombord.info backend)
-#             MAC-based auth: hitting the CGI endpoint is enough.
-#             Verified via JSONP user-info endpoint.
+#   WIFIonICE / Ombord  — ICE and IC long-distance trains (SSID: WIFIonICE)
+#                         Portal: login.wifionice.de → ombord.info backend
+#                         MAC-based auth via CGI endpoint, no form needed.
+#                         Verified via JSONP user-info endpoint.
 #
-#   CNA     — DB stations and some regional trains (Vue SPA frontend,
-#             REST API backend at /services/cna-portal/v1/).
-#             api_type from /config determines whether to use Ombord
-#             or the local /cna/logon REST endpoint.
+#   CNA (local)         — DB stations and some regional trains
+#                         Vue SPA frontend, REST API at /services/cna-portal/v1/
+#                         api_type from /config determines the auth method.
 #
-# No credentials required for either portal.
+#   CNA (Ombord)        — Some trains use the CNA frontend but Ombord backend
+#                         (api_type = 'ombord' or 'emailreg')
+#
+# No credentials required for any variant.
 # ─────────────────────────────────────────────────────────────────────────────
 # This file is a magic.login Python plugin.
 # Required exports:  can_handle(portal_url, html) -> bool
@@ -34,11 +37,12 @@ def can_handle(portal_url, html):
     ul = portal_url.lower()
     h  = (html or '').lower()
     return (
-        'ombord.info'          in ul or 'ombord.info'          in h or
-        'wifi.bahn.de'         in ul or 'bahn.de'              in ul or
-        'cna-portal'           in h  or
-        '/services/cna-portal/v1/' in h or
-        'cna-portal-frontend'  in h
+        'ombord.info'              in ul or 'ombord.info'          in h or
+        'wifionice'                in ul or 'wifionice'            in h or
+        'wifi.bahn.de'             in ul or 'bahn.de'              in ul or
+        'cna-portal'               in h  or
+        '/services/cna-portal/v1/' in h  or
+        'cna-portal-frontend'      in h
     )
 
 
@@ -46,6 +50,8 @@ def handle(portal_url, html, ticket=None, username=None, password=None):
     ul = portal_url.lower()
     h  = (html or '').lower()
     if 'ombord.info' in ul or 'ombord.info' in h:
+        return _handle_ombord(portal_url, ticket=ticket)
+    if 'wifionice' in ul or 'wifionice' in h:
         return _handle_ombord(portal_url, ticket=ticket)
     return _handle_cna(portal_url, ticket=ticket,
                        username=username, password=password)

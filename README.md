@@ -24,7 +24,7 @@
 
 | File | Portal | Notes |
 |------|--------|-------|
-| `magic.d/bahn.py` | Deutsche Bahn ICE + stations | Ombord (MAC-based) and CNA (REST API) |
+| `magic.d/bahn.py` | Deutsche Bahn WIFIonICE + stations | Ombord (MAC-based) and CNA (REST API) |
 | `magic.d/freekey.yaml` | free-key.eu | German public WiFi, 4-step flow |
 | `magic.d/bayernwlan.yaml` | BayernWLAN (`@BayernWLAN`) | Free, T&C only, operated by Vodafone |
 | `magic.d/hotsplots.yaml` | Hotsplots | Venues, restaurants, hotels |
