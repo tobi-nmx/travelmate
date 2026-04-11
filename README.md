@@ -239,23 +239,16 @@ magic.d/
   telekom.yaml       # Telekom Hotspot
   vodafone.yaml      # Vodafone Hotspot
 README.md
+CONTRIBUTING.md
 ```
 
 ---
 
 ## Contributing
 
-Pull requests for new portal handlers are welcome.
-
-- **Simple portals** (single form, checkbox): a YAML file is all that's needed
-- **Complex portals** (multi-step, REST API, custom auth): use a Python plugin (`.py`)
-- Please do **not** modify `magic.login` itself for portal-specific logic — keep it in `magic.d/`
-
-When submitting a handler please include:
-- The portal name and URL
-- Which SSIDs / regions it applies to
-- Whether credentials are required
-- A brief description of the login flow (number of steps, any tokens or session handling)
+See [CONTRIBUTING.md](CONTRIBUTING.md) for a step-by-step guide on how to capture
+a debug log, generate a YAML handler with AI assistance, and submit it — either
+as a GitHub Issue or a pull request.
 
 ---
 
