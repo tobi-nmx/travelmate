@@ -15,15 +15,15 @@ longer works — please [open an issue](../../issues/new).
 | free-key.eu | free-key * | dedicated | `magic.d/freekey.yaml` | DE (towns, campsites) | ✅ tested | 4-step flow with session token and T&C |
 | Deutsche Bahn WIFIonICE | WIFIonICE | dedicated | `magic.d/bahn.py` | DE/EU (ICE, IC trains) | ✅ tested | Onboard MAC-based auth |
 | Deutsche Bahn stations | — | dedicated | `magic.d/bahn.py` | DE (stations) | ✅ tested | CNA REST API |
-| BayernWLAN | @BayernWLAN | generic | - | DE (Bavaria) | ✅ tested | Free, T&C only |
-| Telekom Hotspot | Telekom_FON_* | generic? | — | DE | ❓ untested | Captive portal with login form (credentials), likely redirect-based |
-| Vodafone Hotspot | VodafoneWifi* | generic? | — | DE | ❓ untested | Similar to Telekom; captive + account login |
-| Hotsplots | varies | generic? | — | DE | ❓ untested | Simple splash page with T&C checkbox |
-| McDonald's / The Cloud | McDonaldsWifi | generic? | — | EU | ❓ untested | Usually single-step accept via provider |
-| Autobahn / Tank & Rast | varies | generic? | — | DE | ❓ untested | Typically simple portals but inconsistent setups |
-| Frankfurt Airport (FRA) | FRA Free WiFi | generic? | — | DE | ❓ untested | Likely redirect + session-based flow |
-| Munich Airport (MUC) | MUC Free WiFi | generic? | — | DE | ❓ untested | Similar to FRA |
-| Starbucks | StarbucksWiFi | dedicated? | — | EU | ❓ untested | Often federated login → may require YAML |
+| BayernWLAN | @BayernWLAN | generic | - | DE (Bavaria) | ✅ tested | Simple captive portal, T&C only“ → „Simple captive portal with single T&C accept, no registration. |
+| Telekom Hotspot | Telekom_FON_* | generic? | — | DE | ❓ untested | Redirect-based captive portal with login form (Hotspot pass / t-online.de credentials or ticket). |
+| Vodafone Hotspot | VodafoneWifi* | generic? | — | DE | ❓ untested | Captive portal with T&C splash, short free session, optional extension via Hotspot flat or ticket. |
+| Hotsplots | varies | generic? | — | DE | ❓ untested | Splash page with T&C checkbox, often plus voucher/ticket field depending on location. |
+| McDonald's / The Cloud | McDonaldsWifi | generic? | — | EU | ❓ untested | Provider-managed splash page with T&C accept; sometimes minimal form (e.g. name/email). |
+| Autobahn / Tank & Rast | varies | generic? | — | DE | ❓ untested | Typically simple redirect-based captive portals; implementations vary by operator and location. |
+| Frankfurt Airport (FRA) | FRA Free WiFi | generic? | — | DE | ❓ untested | Redirect to portal with T&C button, then time-limited session. |
+| Munich Airport (MUC) | MUC Free WiFi | generic? | — | DE | ❓ untested | Browser-based portal with email and T&C accept, then unlimited free Wi-Fi. |
+| Starbucks | StarbucksWiFi | dedicated? | — | EU | ❓ untested | Captive portals run by different providers; often T&C plus optional social/federated login (may need dedicated handler). |
 
 ---
 
