@@ -11,8 +11,10 @@ Usage:
   magic.login [--debug] [--force] <username> <password>   # username+password portals
 
 Flags:
-  --debug   Write detailed log and HTML dumps to /tmp/captive-debug/
-  --force   Skip the fast online pre-check and always run the full login flow
+  --debug    Write detailed log and HTML dumps to /tmp/captive-debug/
+  --force    Skip the fast online pre-check and always run the full login flow
+  --no-bind  Skip SO_BINDTODEVICE interface binding
+             Use this when running outside OpenWrt (e.g. on Android/Termux)
 
 Cron usage (re-login when session expires, e.g. every 5 minutes):
   */5 * * * * /etc/travelmate/magic.login
@@ -169,9 +171,10 @@ def _fast_online_check():
 
 # Run early check before loading heavy modules.
 # Skip if --debug or --force flags are present (we want full output then).
-_ARGV = sys.argv[1:]
-_FORCE = '--force' in _ARGV
-_DEBUG = '--debug' in _ARGV
+_ARGV     = sys.argv[1:]
+_FORCE    = '--force'   in _ARGV
+_DEBUG    = '--debug'   in _ARGV
+_NO_BIND  = '--no-bind' in _ARGV   # skip SO_BINDTODEVICE (for use outside OpenWrt)
 
 if not _FORCE and not _DEBUG:
     if _fast_online_check():
@@ -294,7 +297,7 @@ CREDS_FILE   = '/etc/captive-credentials.conf'
 
 def parse_args():
     global DEBUG
-    args = [a for a in sys.argv[1:] if a not in ('--debug', '--force')]
+    args = [a for a in sys.argv[1:] if a not in ('--debug', '--force', '--no-bind')]
     if _DEBUG:
         DEBUG = True
         _init_debug()
@@ -307,7 +310,7 @@ def parse_args():
         return args[0], None, None
     if len(args) == 2:
         return None, args[0], args[1]
-    die('Usage: magic.login [--debug] [--force] [ticket | username password]')
+    die('Usage: magic.login [--debug] [--force] [--no-bind] [ticket | username password]')
 
 # ── HTTP helpers ──────────────────────────────────────────────────────────────
 
@@ -358,9 +361,11 @@ def _make_opener(jar=None, follow_redirects=True):
     handlers = [urllib.request.HTTPCookieProcessor(jar)]
     if not follow_redirects:
         handlers.append(_NoRedirect())
-    if _UPLINK_IFACE:
+    if _UPLINK_IFACE and not _NO_BIND:
         handlers.append(_BoundHTTPHandler(_UPLINK_IFACE))
         dbg('Binding HTTP requests to interface: %s' % _UPLINK_IFACE)
+    elif _NO_BIND:
+        dbg('--no-bind: skipping interface binding (running outside OpenWrt)')
     opener = urllib.request.build_opener(*handlers)
     opener.addheaders = list(HEADERS.items())
     return opener, jar
@@ -904,6 +909,7 @@ def handle_generic(portal_url, html, ticket=None, username=None, password=None,
 
     data = fill_form(best, ticket=ticket, username=username, password=password)
     action_url = resolve_action(portal_url, best['action'])
+
     log('[Generic] Submitting to %s' % action_url)
     log('[Generic] POST data: %s' % {k: v for k, v in data.items() if 'pass' not in k.lower()})
 
