@@ -15,7 +15,7 @@ longer works — please [open an issue](../../issues/new).
 | free-key.eu | free-key * | dedicated | `magic.d/freekey.yaml` | DE (towns, campsites) | ✅ tested | 4-step flow with session token and T&C |
 | Deutsche Bahn WIFIonICE | WIFIonICE | dedicated | `magic.d/bahn.py` | DE/EU (ICE, IC trains) | ✅ tested | Onboard MAC-based auth |
 | Deutsche Bahn stations | — | dedicated | `magic.d/bahn.py` | DE (stations) | ✅ tested | CNA REST API |
-| BayernWLAN | @BayernWLAN | dedicated | `magic.d/bayernwlan.yaml` | DE (Bavaria) | ✅ tested | Free, T&C only |
+| BayernWLAN | @BayernWLAN | generic | - | DE (Bavaria) | ✅ tested | Free, T&C only |
 | Telekom Hotspot | Telekom_FON_* | generic? | — | DE | ❓ untested | Captive portal with login form (credentials), likely redirect-based |
 | Vodafone Hotspot | VodafoneWifi* | generic? | — | DE | ❓ untested | Similar to Telekom; captive + account login |
 | Hotsplots | varies | generic? | — | DE | ❓ untested | Simple splash page with T&C checkbox |

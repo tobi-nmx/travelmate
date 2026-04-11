@@ -26,11 +26,10 @@
 |------|--------|-------|
 | `magic.d/bahn.py` | Deutsche Bahn WIFIonICE + stations | Ombord (MAC-based) and CNA (REST API) |
 | `magic.d/freekey.yaml` | free-key.eu | German public WiFi, 4-step flow |
-| `magic.d/bayernwlan.yaml` | BayernWLAN (`@BayernWLAN`) | Free, T&C only, operated by Vodafone |
-| `magic.d/hotsplots.yaml` | Hotsplots | Venues, restaurants, hotels |
-| `magic.d/telekom.yaml` | Telekom Hotspot | Requires credentials |
-| `magic.d/vodafone.yaml` | Vodafone Hotspot | Requires credentials |
-| *(built-in)* | Generic HTML form | Fallback for all others |
+| *(built-in)* | Generic HTML form | Fallback for all other portals |
+
+Only portals that have been tested are included. For a full list of known portals
+and their test status, see [TESTED_PORTALS.md](TESTED_PORTALS.md).
 
 ---
 
@@ -235,11 +234,9 @@ magic.d/
   bahn.py            # Deutsche Bahn (ICE + stations) — Python plugin
   freekey.yaml       # free-key.eu
   bayernwlan.yaml    # BayernWLAN (@BayernWLAN)
-  hotsplots.yaml     # Hotsplots
-  telekom.yaml       # Telekom Hotspot
-  vodafone.yaml      # Vodafone Hotspot
 README.md
 CONTRIBUTING.md
+TESTED_PORTALS.md
 ```
 
 ---
