@@ -245,10 +245,22 @@ See `magic.d/bahn.py` for a real-world example covering two portal backends
 
 ## Known portal quirks
 
-**`looks_like_success()` false positives** — the generic handler scans response
-HTML for keywords like "Welcome", "connected", "authorized". Some portals include
-these words on intermediate pages (e.g. "Welcome to free-key"). Use `only_if` in
-a YAML handler to skip steps that would otherwise trigger on these pages.
+**`looks_like_success()` false positives** — success detection uses two
+independent checks:
+
+1. **HTML keyword scan** — searches the response body for words from `SUCCESS_WORDS`:
+   `verbunden`, `erfolgreich`, `angemeldet`, `internetzugang`, `abmelden` (German)
+   and `now connected`, `enjoy`, `logout`, `authorized` etc. (English).
+   `FAILURE_WORDS` are checked first and take priority if found.
+
+2. **URL keyword scan** — checks whether the final redirect URL contains
+   `success`, `connected`, `welcome`, or `online`. This is a weaker signal
+   and primarily catches English portal URL conventions (e.g. `/login/success`);
+   German portals rarely use these words in URLs.
+
+Some portals include success-like words on intermediate pages (e.g. "Welcome to
+free-key" on a T&C page). Use `only_if` in a YAML handler to skip steps that
+would otherwise trigger a false positive.
 
 **`link-orig` / `dst` / `redirect` fields** — many portal frameworks include a
 redirect-back field in the login form. Some portals break if this value is
