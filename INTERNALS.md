@@ -272,10 +272,22 @@ with a status page (e.g. `hotspot.example.com/status`), the script also checks
 that page if all probe URLs are still redirected.
 
 **Session expiry** — some portals (e.g. free-key.eu) expire sessions after a
-few hours. Travelmate may not detect this because the hotspot continues to return
-HTTP 204 to probe requests even after the session has expired. The recommended
-workaround is a cron job that runs `magic.login` every 5 minutes — the fast
-pre-check keeps the overhead to ~1s when already online.
+few hours. Travelmate may not detect this because its connectivity check accepts
+any HTTP 200 or 204 response as "online" — it does not verify that the response
+body is empty or that no redirect occurred at the HTTP level. A hotspot that
+returns a well-formed 204 after session expiry (instead of redirecting to the
+login page again) will therefore fool Travelmate indefinitely.
+
+Switching `trm_captiveurl` to HTTPS would in theory prevent this (a hotspot
+cannot fake a TLS-verified 204 from Google), but it would also break initial
+portal detection — the hotspot can only intercept and redirect plain HTTP
+requests, so HTTPS would never trigger the captive portal flow.
+
+The recommended workaround is a cron job that runs `magic.login` every 5
+minutes. When the session has expired and the portal redirects again,
+`magic.login` will detect the login page and re-authenticate. The fast
+pre-check (`generate_204` with strict empty-body requirement) keeps the
+overhead to ~1s in the normal "already online" case.
 
 **`_detect_uplink_iface()` compatibility** — the field name for the uplink
 interface in `/tmp/trm_runtime.json` varies across Travelmate versions. The
