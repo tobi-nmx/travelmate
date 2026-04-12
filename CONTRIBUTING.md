@@ -37,6 +37,11 @@ with Python 3 installed).
 On Android with [Termux](https://termux.dev):
 ```sh
 pkg install python
+pip install --break-system-packages pyyaml
+```
+
+On any other system with Python 3:
+```sh
 pip install pyyaml
 ```
 
@@ -46,11 +51,16 @@ python magic.login --debug --no-bind
 ```
 
 - `--debug` writes a full session log and HTML dumps to `/tmp/captive-debug/`
+  (or `./captive-debug/` on Termux, where `/tmp` is not available)
 - `--no-bind` disables OpenWrt-specific interface binding (required outside OpenWrt)
 
 **After the run, collect the debug files:**
+
+On OpenWrt: `/tmp/captive-debug/`  
+On Termux: `./captive-debug/` (in the directory where you ran the script)
+
 ```
-/tmp/captive-debug/
+captive-debug/
   session.log          ← timestamped log of all requests and responses
   step_01_*.html       ← raw HTML of each page encountered
   step_02_*.html
