@@ -14,7 +14,7 @@ longer works — please [open an issue](../../issues/new).
 |--------|------|--------------|---------|--------|-------------|-------|
 | free-key.eu | free-key * | dedicated | `magic.d/freekey.yaml` | DE (towns, campsites) | ✅ tested | 4-step flow with session token and T&C |
 | Deutsche Bahn WIFIonICE | WIFIonICE | dedicated | `magic.d/bahn.py` | DE/EU (ICE, IC trains) | ✅ tested | Onboard MAC-based auth |
-| Deutsche Bahn stations | — | dedicated | `magic.d/bahn.py` | DE (stations) | ✅ tested | CNA REST API |
+| Deutsche Bahn stations | WIFI@DB | dedicated | `magic.d/bahn.py` | DE (stations) | ✅ tested | CNA REST API |
 | BayernWLAN | @BayernWLAN | generic | - | DE (Bavaria) | ✅ tested | Simple captive portal, T&C only“ → „Simple captive portal with single T&C accept, no registration. |
 | M-WLAN (Munich) | M-WLAN Free WiFi | generic | — | DE (Munich) | ❓ untested | Simple AGB portal with browser redirect; time-limited session, no registration. |
 | Telekom Hotspot | Telekom_FON_* | generic? | — | DE | ❓ untested | Redirect-based captive portal with login form (Hotspot pass / t-online.de credentials or ticket). |
