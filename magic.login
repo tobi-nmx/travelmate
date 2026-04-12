@@ -479,44 +479,49 @@ def detect_portal():
     log('[detect] All probes failed')
     return None, None
 
-# ── Success / failure detection ───────────────────────────────────────────────
+# ── Failure detection ─────────────────────────────────────────────────────────
 
-SUCCESS_WORDS = [
-    'now connected', 'verbunden', 'erfolgreich', 'angemeldet',
-    'enjoy', 'you are online', 'internet access', 'internetzugang',
-    'logout', 'abmelden', 'signed in', 'authorized',
-]
-
+# Keywords that indicate a login attempt definitely failed.
+# Checked after every form submission — triggers immediate abort.
 FAILURE_WORDS = [
-    'session has expired', 'session expired', 'sitzung abgelaufen',
-    'please reconnect', 'login failed', 'invalid', 'error', 'fehler',
+    # English
+    'session has expired', 'session expired',
+    'please reconnect', 'login failed', 'invalid',
     'access denied', 'wrong password', 'incorrect', 'not authorized',
+    # German
+    'sitzung abgelaufen', 'fehler', 'ungültig', 'zugang verweigert',
+    'falsches passwort',
+    # French
+    'session expirée', 'accès refusé', 'mot de passe incorrect',
+    # Italian
+    'sessione scaduta', 'accesso negato', 'password errata',
+    # Spanish
+    'sesión expirada', 'acceso denegado', 'contraseña incorrecta',
+    # Dutch
+    'sessie verlopen', 'toegang geweigerd', 'onjuist wachtwoord',
 ]
 
-STATUS_SUCCESS_WORDS = [
-    'bereits aktiv', 'already active', 'angemeldet', 'aktiv angemeldet',
-    'you are connected', 'session active', 'logged in', 'authorized',
-    'sitzungsstatistik', 'session statistic',
-]
-
-def looks_like_success(html, final_url=''):
+def looks_like_failure(html):
+    """Return True if the response clearly indicates a login failure."""
     if html is None:
         return False
     lower = html.lower()
     if any(w in lower for w in FAILURE_WORDS):
         dbg('Failure keyword detected in response')
-        return False
-    if any(w in lower for w in SUCCESS_WORDS):
-        return True
-    if any(w in final_url.lower() for w in ['success', 'connected', 'welcome', 'online']):
         return True
     return False
+
+_STATUS_SUCCESS_WORDS = [
+    'bereits aktiv', 'already active', 'aktiv angemeldet',
+    'you are connected', 'session active', 'logged in', 'authorized',
+    'sitzungsstatistik', 'session statistic',
+]
 
 def _status_page_ok(status_url, opener):
     if not status_url:
         return False
     body, _, _ = http_get(status_url, opener=opener)
-    if body and any(w in body.lower() for w in STATUS_SUCCESS_WORDS):
+    if body and any(w in body.lower() for w in _STATUS_SUCCESS_WORDS):
         log('[connectivity] ✓ Authorized via status page %s' % status_url)
         return True
     return False
@@ -891,13 +896,33 @@ def _run_yaml_handler(handler, portal_url, html, ticket, username, password):
 
 # ── Generic HTML-form handler (Python fallback) ───────────────────────────────
 
+_LOGIN_FIELD_TYPES = {'password', 'checkbox', 'submit'}
+
+def _has_login_form(forms):
+    """
+    Return True if any parsed form looks like a pending login step.
+    A form qualifies if it contains a password field, a checkbox, a submit
+    button, or a field name matching the ticket/user patterns.
+    Pure GET search forms (single text field, GET method) are ignored.
+    """
+    for form in forms:
+        fields = form['fields']
+        if not fields:
+            continue
+        # Ignore simple GET forms (e.g. search boxes)
+        if form['method'] == 'GET' and len(fields) <= 1:
+            continue
+        for name, fld in fields.items():
+            if fld['type'] in _LOGIN_FIELD_TYPES:
+                return True
+            if _TICKET_RE.search(name) or _USER_RE.search(name):
+                return True
+    return False
+
 def handle_generic(portal_url, html, ticket=None, username=None, password=None,
-                   opener=None, jar=None, _depth=0):
+                   opener=None, jar=None, _depth=0, _status_url=None):
     if not html:
         log('[Generic] No HTML received')
-        return False
-    if _depth > 3:
-        log('[Generic] Too many form steps')
         return False
     if opener is None:
         opener, jar = _make_opener()
@@ -906,9 +931,23 @@ def handle_generic(portal_url, html, ticket=None, username=None, password=None,
     if DEBUG:
         dbg_html('generic_depth%d' % _depth, portal_url, html, forms=forms)
 
+    # Extract status URL from form fields on the first call (Mikrotik/Coova pattern)
+    if _status_url is None:
+        for frm in forms:
+            for fn, fld in frm['fields'].items():
+                if 'status' in fn.lower() and (fld.get('value') or '').startswith('http'):
+                    _status_url = fld['value']
+                    dbg('[Generic] Found status URL: %s' % _status_url)
+                    break
+
     if not best:
-        log('[Generic] No form found')
-        return looks_like_success(html, portal_url)
+        # No form found — nothing left to submit, run connectivity check
+        log('[Generic] No login form found — verifying connectivity')
+        if _connectivity_ok(opener, status_url=_status_url):
+            log('[Generic] Connectivity confirmed')
+            return True
+        log('[Generic] Login outcome unclear')
+        return False
 
     log('[Generic] Form: method=%s action=%r  fields=%s' % (
         best['method'], best['action'], list(best['fields'].keys())))
@@ -918,13 +957,6 @@ def handle_generic(portal_url, html, ticket=None, username=None, password=None,
 
     log('[Generic] Submitting to %s' % action_url)
     log('[Generic] POST data: %s' % {k: v for k, v in data.items() if 'pass' not in k.lower()})
-
-    # Extract status URL if present
-    status_url = None
-    for fn, fld in best['fields'].items():
-        if 'status' in fn.lower() and (fld.get('value') or '').startswith('http'):
-            status_url = fld['value']
-            break
 
     if best['method'] == 'POST':
         body2, final2, _ = http_post(action_url, data, opener=opener,
@@ -938,20 +970,24 @@ def handle_generic(portal_url, html, ticket=None, username=None, password=None,
     if body2:
         log('[Generic] Response snippet: %r' % body2[:300].strip())
 
-    if looks_like_success(body2, final2):
-        log('[Generic] Login successful!')
-        return True
+    # Abort immediately if the response clearly signals a failure
+    if looks_like_failure(body2):
+        log('[Generic] Login failed — failure keyword in response')
+        return False
 
-    if body2 and final2 != action_url:
+    # If the response contains another login form and we have recursion budget,
+    # follow it rather than running a connectivity check prematurely
+    if body2 and _depth < 3:
         forms2, best2 = parse_forms(body2)
-        if best2 and best2['fields']:
-            log('[Generic] Following next form step at %s' % final2)
+        if _has_login_form(forms2):
+            log('[Generic] Another login form detected — following (depth %d)' % (_depth + 1))
             return handle_generic(final2, body2, ticket=ticket,
                                   username=username, password=password,
-                                  opener=opener, jar=jar, _depth=_depth+1)
+                                  opener=opener, jar=jar,
+                                  _depth=_depth + 1, _status_url=_status_url)
 
-    time.sleep(2)
-    if _connectivity_ok(opener, status_url=status_url):
+    # No more login forms — verify actual connectivity
+    if _connectivity_ok(opener, status_url=_status_url):
         log('[Generic] Connectivity confirmed after form submission')
         return True
 
