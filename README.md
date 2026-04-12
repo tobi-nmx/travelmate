@@ -233,7 +233,6 @@ magic.login          # main script (Python 3, requires python3-yaml)
 magic.d/
   bahn.py            # Deutsche Bahn (ICE + stations) — Python plugin
   freekey.yaml       # free-key.eu
-  bayernwlan.yaml    # BayernWLAN (@BayernWLAN)
 README.md
 CONTRIBUTING.md
 TESTED_PORTALS.md
