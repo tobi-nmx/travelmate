@@ -95,6 +95,17 @@ CoffeeShop_WLAN                      ticket     ABCD-1234
 
 The script reads the active SSID from Travelmate's runtime JSON and matches it against this file automatically. Free/checkbox portals need no entry.
 
+Credentials can also be passed directly on the command line — this takes priority
+over the config file and is useful for manual testing:
+
+```sh
+magic.login username password       # username/password portal
+magic.login myticket                 # ticket/voucher portal
+```
+
+For normal Travelmate operation, the config file is recommended — it handles
+all SSIDs automatically without modifying the Travelmate configuration.
+
 ---
 
 ## Writing a custom handler
