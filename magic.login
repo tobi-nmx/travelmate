@@ -43,8 +43,14 @@ Credentials file (/etc/captive-credentials.conf):
 """
 
 import sys
+import os as _os
 import urllib.request
 import urllib.error
+
+# Writable temp directory: /tmp on OpenWrt, current working directory on
+# environments without /tmp (e.g. Termux on Android).
+_TMP_DIR    = '/tmp' if _os.access('/tmp', _os.W_OK) else _os.getcwd()
+_PROBE_BODY = _os.path.join(_TMP_DIR, 'magic_probe_body')
 
 # ── Fast online pre-check ─────────────────────────────────────────────────────
 # Runs before any heavy imports. Uses a raw socket-level HTTP request to avoid
@@ -124,7 +130,7 @@ def _fast_online_check():
         try:
             cmd = (['curl', '--silent', '--max-time', '3',
                     '--write-out', '%{http_code} %{url_effective}',
-                    '--output', '/tmp/magic_probe_body',
+                    '--output', _PROBE_BODY,
                     '--location']          # follow redirects so we see final URL
                    + iface_args + [url])
             result = _sp.run(cmd, capture_output=True, text=True, timeout=5)
@@ -136,7 +142,7 @@ def _fast_online_check():
                 continue
 
             try:
-                body = open('/tmp/magic_probe_body').read()
+                body = open(_PROBE_BODY).read()
             except Exception:
                 body = ''
 
@@ -182,7 +188,7 @@ if not _FORCE and not _DEBUG:
         sys.exit(0)
 
 # Heavy imports — only reached if we might need to log in
-import re, json, time, os, glob
+import re, json, time, glob
 import http.cookiejar
 import urllib.parse
 from html.parser import HTMLParser
@@ -197,11 +203,11 @@ except ImportError:
 DEBUG         = False
 _debug_log_fh = None
 _debug_step   = 0
-DEBUG_DIR     = '/tmp/captive-debug'
+DEBUG_DIR     = _os.path.join(_TMP_DIR, 'captive-debug')
 
 def _init_debug():
     global _debug_log_fh
-    os.makedirs(DEBUG_DIR, exist_ok=True)
+    _os.makedirs(DEBUG_DIR, exist_ok=True)
     path = '%s/session.log' % DEBUG_DIR
     _debug_log_fh = open(path, 'w', buffering=1)
     log('[debug] Writing debug log to %s' % path)
@@ -697,7 +703,7 @@ def _load_handlers():
         log('[handlers] python3-yaml not available — YAML handlers disabled')
         log('[handlers] Install with: opkg install python3-yaml')
     else:
-        for path in sorted(glob.glob(os.path.join(HANDLERS_DIR, '*.yaml'))):
+        for path in sorted(glob.glob(_os.path.join(HANDLERS_DIR, '*.yaml'))):
             try:
                 with open(path) as f:
                     h = yaml.safe_load(f)
@@ -712,7 +718,7 @@ def _load_handlers():
 
     # ── Python plugin handlers ────────────────────────────────────────────────
     import importlib.util as _ilu
-    for path in sorted(glob.glob(os.path.join(HANDLERS_DIR, '*.py'))):
+    for path in sorted(glob.glob(_os.path.join(HANDLERS_DIR, '*.py'))):
         try:
             spec = _ilu.spec_from_file_location('magic_handler', path)
             mod  = _ilu.module_from_spec(spec)
