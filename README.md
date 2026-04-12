@@ -77,13 +77,32 @@ echo "*/5 * * * * /etc/travelmate/magic.login" >> /etc/crontabs/root
 /etc/init.d/cron restart
 ```
 
-Use `--force` to bypass the fast online check and always run the full login flow.
-
 ---
 
-## Credentials file
+## Credentials
 
-For portals that require a username/password or ticket, create `/etc/captive-credentials.conf`:
+For portals that require a username/password or ticket, there are two ways to
+provide credentials.
+
+### 1. Per-station in Travelmate (recommended)
+
+In LuCI, set `magic.login` as the **Auto Login Script** for a wireless station
+and enter the credentials as **Script Arguments**. In `/etc/config/travelmate`
+this looks like:
+
+```
+config station 'mystation'
+    option script      '/etc/travelmate/magic.login'
+    option script_args 'myuser mypassword'   # or just 'myticket' for ticket portals
+```
+
+Travelmate passes the arguments directly to the script when it connects to that
+station. Free/checkbox portals need no arguments.
+
+### 2. Credentials file
+
+For setups with many SSIDs, or when you prefer to manage all credentials in one
+place, create `/etc/captive-credentials.conf`:
 
 ```
 # SSID pattern (fnmatch wildcards)   type       credential(s)
@@ -93,139 +112,18 @@ CoffeeShop_WLAN                      ticket     ABCD-1234
 *                                    free
 ```
 
-The script reads the active SSID from Travelmate's runtime JSON and matches it against this file automatically. Free/checkbox portals need no entry.
-
-Credentials can also be passed directly on the command line — this takes priority
-over the config file and is useful for manual testing:
-
-```sh
-magic.login username password       # username/password portal
-magic.login myticket                 # ticket/voucher portal
-```
-
-For normal Travelmate operation, the config file is recommended — it handles
-all SSIDs automatically without modifying the Travelmate configuration.
+The script reads the active SSID from Travelmate's runtime JSON and matches it
+against this file automatically. Per-station script arguments take priority over
+the credentials file if both are set.
 
 ---
 
-## Writing a custom handler
-
-### YAML handler (simple portals)
-
-Create a file in `magic.d/` — for example `magic.d/myportal.yaml`:
-
-```yaml
-name: My Hotel Portal
-priority: 20          # lower = checked first (default: 50)
-
-# Portal is matched when any of these strings appear in the portal URL or HTML
-match:
-  - myhotel-wifi.com
-  - myhotelportal
-
-retry_delays: [1, 2, 3, 5, 5]   # seconds between connectivity checks
-
-steps:
-  - label:       login
-    action:      from_form      # use action URL from the HTML form
-    fields:      from_form      # fill all fields from the HTML form
-    check_boxes: true           # tick any checkboxes (T&C acceptance)
-```
-
-#### Step options
-
-| Option | Values | Description |
-|--------|--------|-------------|
-| `label` | string | Name shown in log output and debug filenames |
-| `action` | `from_form` / URL | Where to POST; `from_form` reads it from the HTML |
-| `fields` | `from_form` / dict | Form data; `from_form` fills from HTML, dict overrides |
-| `method` | `POST` / `GET` | HTTP method (default: `POST`) |
-| `check_boxes` | `true` | Tick all checkboxes before submitting |
-| `clear_fields` | list | Set these field values to empty string |
-| `inject_fields` | dict | Add or override specific fields |
-| `only_if` | string | Skip step unless this string appears in the last response |
-| `only_if_action` | string | Skip step unless form action URL contains this string |
-
-#### Multi-step example (free-key.eu style)
-
-```yaml
-name: Example multi-step portal
-match: [example-portal.com]
-retry_delays: [1, 2, 3, 5, 5]
-
-steps:
-  - label:        initial_post
-    action:       from_form
-    fields:       from_form
-    clear_fields: [link-orig]
-
-  - label:    token_auth
-    action:   from_form
-    fields:   from_form
-    only_if:  SESSION_TOKEN    # only runs if server returned a token form
-
-  - label:       accept_tos
-    action:      from_form
-    fields:      from_form
-    check_boxes: true
-    only_if:     agb
-
-  - label:          router_login
-    action:         from_form
-    fields:         from_form
-    only_if_action: hotspot    # only runs when form posts back to the AP
-```
-
-### Python plugin (complex portals)
-
-For portals that require custom logic (REST APIs, JSONP, dynamic URL construction),
-create a `.py` file in `magic.d/`:
-
-```python
-# magic.d/myplugin.py
-
-PRIORITY = 20   # optional, default 50
-
-def can_handle(portal_url, html):
-    return 'myportal.example.com' in portal_url.lower()
-
-def handle(portal_url, html, ticket=None, username=None, password=None):
-    log      = _ctx['log']
-    http_get = _ctx['http_get']
-    http_post = _ctx['http_post']
-    _make_opener = _ctx['_make_opener']
-    _connectivity_ok = _ctx['_connectivity_ok']
-
-    log('[MyPortal] Starting login')
-    opener, _ = _make_opener()
-    # ... custom logic ...
-    return _connectivity_ok(opener)
-```
-
-Core helpers available via `_ctx`:
-
-| Key | Description |
-|-----|-------------|
-| `log` | Print to stdout (and debug log if active) |
-| `dbg` | Debug-only log output |
-| `http_get(url, opener, _dbg_label)` | GET request |
-| `http_post(url, data, opener, ...)` | POST request |
-| `_make_opener(jar, follow_redirects)` | Create a cookie-aware HTTP opener bound to the uplink interface |
-| `_connectivity_ok(opener, status_url)` | Verify internet access via probe URLs |
-| `origin_of(url)` | Extract `scheme://host` from a URL |
-| `json` | `json` module |
-| `time` | `time` module |
-| `urllib_parse` | `urllib.parse` module |
-| `urllib_error` | `urllib.error` module |
-
----
-
-## Debugging
+## Debugging & Contributing
 
 Run with `--debug` to get a full session log and HTML dumps:
 
 ```sh
-/etc/travelmate/magic.login --debug
+/etc/travelmate/magic.login --debug --force
 ```
 
 Output is written to `/tmp/captive-debug/`:
@@ -234,6 +132,21 @@ Output is written to `/tmp/captive-debug/`:
 
 Additional flags:
 - `--force` — skip the fast online pre-check and always run the full login flow
+- `--no-bind` — skip interface binding, required when running outside OpenWrt (e.g. on a laptop or Android/Termux for portal debugging)
+
+A debug log is also the starting point for contributing support for a new portal.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full step-by-step guide.
+
+---
+
+## Going deeper
+
+[INTERNALS.md](INTERNALS.md) covers the technical details of `magic.login` — useful if you want to understand how the script works, write a custom handler, or diagnose an unusual portal:
+
+- Architecture overview (dispatcher, plugin loading, generic handler, fast check)
+- YAML handler reference with all step options
+- Python plugin API
+- Known portal quirks and gotchas
 
 ---
 
@@ -245,17 +158,10 @@ magic.d/
   bahn.py            # Deutsche Bahn (ICE + stations) — Python plugin
   freekey.yaml       # free-key.eu
 README.md
-CONTRIBUTING.md
+CONTRIBUTING.md      # how to add support for a new portal
+INTERNALS.md         # architecture, YAML reference, Python plugin API
 TESTED_PORTALS.md
 ```
-
----
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for a step-by-step guide on how to capture
-a debug log, generate a YAML handler with AI assistance, and submit it — either
-as a GitHub Issue or a pull request.
 
 ---
 

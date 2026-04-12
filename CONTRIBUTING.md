@@ -152,7 +152,7 @@ contents into the chat.
 
 ---
 
-## Step 3 — Test the generated handler
+## Step 3 — Test the handler
 
 Copy the generated YAML file to `magic.d/` on your OpenWrt router:
 
@@ -169,7 +169,8 @@ ssh root@192.168.1.1 /etc/travelmate/magic.login --debug --force
 - `--debug` lets you verify that the new YAML handler is being used
 
 Look for `[dispatch] Matched YAML handler:` in the output — that confirms the new
-handler was picked up instead of the generic fallback.
+handler was picked up instead of the generic fallback. Then verify that the script
+reports `[*] Login successful` and that internet access actually works.
 
 ---
 
@@ -200,11 +201,7 @@ all portal handlers belong in `magic.d/`.
 
 ---
 
-## YAML handler reference
+## Going deeper
 
-See [README.md](README.md) for the full list of supported step options
-(`check_boxes`, `clear_fields`, `only_if`, `only_if_action`, etc.)
-and a multi-step example.
-
-For portals that require custom Python logic (REST APIs, JSONP, dynamic tokens),
-see the Python plugin format in README.md and use `magic.d/bahn.py` as a reference.
+For the full YAML step reference, Python plugin API, and an explanation of how
+the dispatcher and generic handler work internally, see [INTERNALS.md](INTERNALS.md).
