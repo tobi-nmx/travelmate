@@ -40,11 +40,6 @@ pkg install python
 pip install pyyaml
 ```
 
-On any other system with Python 3:
-```sh
-pip install pyyaml
-```
-
 **Run the script in debug mode:**
 ```sh
 python magic.login --debug --no-bind
