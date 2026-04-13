@@ -256,10 +256,6 @@ we follow the next form, or are we done?* This decision is made by
 2. **Submitted state** — tracks whether credentials and/or a checkbox have
    already been submitted in previous steps. Once both have been submitted,
    no further form is expected and `_connectivity_ok()` is called directly.
-3. **Recursion depth** — the minimum score required to follow a form rises
-   with depth (depth 0: any positive score; depth 1: need a real login signal;
-   depth 2: only strong signals). This reduces the risk of accidentally
-   following a post-login logout form or survey.
 
 In `--debug` mode `_should_follow_form()` always returns `True` (with a log
 warning) so that the complete portal flow is captured for YAML development —
