@@ -602,20 +602,38 @@ class _FormParser(HTMLParser):
                              or 'pin' in n or 'key'    in n for n in names)
             score += 1 * any(v['type'] == 'checkbox' for v in fields.values())
             score -= 2 * (form['method'] == 'GET' and len(fields) <= 1)
+            # Penalise logout forms heavily — a logout button on the post-login
+            # page must not be mistaken for a pending login step
+            action_looks_like_logout = bool(_LOGOUT_RE.search(form.get('action', '')))
+            submit_looks_like_logout = any(
+                fld['type'] == 'submit' and _LOGOUT_RE.search(fld.get('value', ''))
+                for fld in fields.values()
+            )
+            if action_looks_like_logout or submit_looks_like_logout:
+                score -= 3
+            # Reward a non-logout submit button — covers simple "CONNECT" or
+            # "Continue to internet" buttons with no other login-specific fields
+            elif any(fld['type'] == 'submit' and fld.get('value', '')
+                     for fld in fields.values()):
+                score += 1
             candidates.append((score, form))
         candidates.sort(key=lambda x: -x[0])
         for _, form in candidates:
             if form['method'] == 'POST':
-                return form
-        return candidates[0][1] if candidates else None
+                return form, candidates[0][0]
+        if candidates:
+            return candidates[0][1], candidates[0][0]
+        return None, 0
 
 def parse_forms(html):
     p = _FormParser()
     p.feed(html)
-    return p.forms, p.best_form()
+    best, score = p.best_form()
+    return p.forms, best, score
 
 # ── Form filling ──────────────────────────────────────────────────────────────
 
+_LOGOUT_RE  = re.compile(r'logout|abmelden|déconnexion|disconnetti|desconectar|afmelden', re.I)
 _TICKET_RE = re.compile(r'ticket|voucher|coupon|code|pin|passcode|access.?key|token|freekey|free.?key', re.I)
 _USER_RE   = re.compile(r'user|login|email|mail|account|name|uid', re.I)
 _PASS_RE   = re.compile(r'pass|pwd|secret|credential', re.I)
@@ -786,7 +804,7 @@ def _run_yaml_handler(handler, portal_url, html, ticket, username, password):
 
     # Extract status URL from the first form (Mikrotik/Coova pattern)
     if current_html:
-        forms, _ = parse_forms(current_html)
+        forms, _, _ = parse_forms(current_html)
         for frm in forms:
             for fn, fld in frm['fields'].items():
                 if 'status' in fn.lower() and (fld.get('value') or '').startswith('http'):
@@ -807,7 +825,7 @@ def _run_yaml_handler(handler, portal_url, html, ticket, username, password):
 
         only_if_action = step.get('only_if_action')
         if only_if_action:
-            forms, best = parse_forms(current_html or '')
+            forms, best, _ = parse_forms(current_html or '')
             if not best or only_if_action.lower() not in best.get('action','').lower():
                 dbg('[%s] Skipping step %r — only_if_action %r not in form action' % (name, label, only_if_action))
                 continue
@@ -815,7 +833,7 @@ def _run_yaml_handler(handler, portal_url, html, ticket, username, password):
         log('[%s] Step: %s' % (name, label))
 
         # ── resolve form and action URL ─────────────────────────────────────
-        forms, best = parse_forms(current_html or '')
+        forms, best, _ = parse_forms(current_html or '')
         if DEBUG and current_html:
             dbg_html('%s_%s' % (name.replace(' ','_'), label),
                      current_url, current_html, forms=forms,
@@ -896,38 +914,49 @@ def _run_yaml_handler(handler, portal_url, html, ticket, username, password):
 
 # ── Generic HTML-form handler (Python fallback) ───────────────────────────────
 
-_LOGIN_FIELD_TYPES = {'password', 'checkbox', 'submit'}
 
-def _has_login_form(forms):
-    """
-    Return True if any parsed form looks like a pending login step.
-    A form qualifies if it contains a password field, a checkbox, a submit
-    button, or a field name matching the ticket/user patterns.
-    Pure GET search forms (single text field, GET method) are ignored.
-    """
-    for form in forms:
-        fields = form['fields']
-        if not fields:
-            continue
-        # Ignore simple GET forms (e.g. search boxes)
-        if form['method'] == 'GET' and len(fields) <= 1:
-            continue
-        for name, fld in fields.items():
-            if fld['type'] in _LOGIN_FIELD_TYPES:
-                return True
-            if _TICKET_RE.search(name) or _USER_RE.search(name):
-                return True
-    return False
+
+def _should_follow_form(best, score, submitted, depth):
+    # Minimum score required to follow a form, rising with each recursion level:
+    #   depth 0 - any positive score (CONNECT button etc.)
+    #   depth 1 - need a real login signal (checkbox, ticket, user field)
+    #   depth 2 - only strong signals (password, user+ticket combination)
+    # In --debug mode always follow so the full portal flow is captured.
+    min_score = depth
+
+    # After both credentials and a checkbox have been submitted, nothing
+    # further is expected — stop unless we are in debug mode.
+    if submitted['credentials'] and submitted['checkbox']:
+        if DEBUG:
+            log('[Generic] DEBUG: credentials+checkbox already submitted — '
+                'following next form anyway for debug capture')
+            return True
+        return False
+
+    if score < min_score:
+        if DEBUG:
+            log('[Generic] DEBUG: score %d below threshold %d at depth %d — '
+                'following anyway for debug capture' % (score, min_score, depth))
+            return True
+        dbg('[Generic] Score %d below threshold %d at depth %d — stopping'
+            % (score, min_score, depth))
+        return False
+
+    return True
+
 
 def handle_generic(portal_url, html, ticket=None, username=None, password=None,
-                   opener=None, jar=None, _depth=0, _status_url=None):
+                   opener=None, jar=None, _depth=0, _status_url=None,
+                   _submitted=None):
     if not html:
         log('[Generic] No HTML received')
         return False
     if opener is None:
         opener, jar = _make_opener()
+    if _submitted is None:
+        _submitted = {'credentials': False, 'checkbox': False}
 
-    forms, best = parse_forms(html)
+    forms, best, best_score = parse_forms(html)
     if DEBUG:
         dbg_html('generic_depth%d' % _depth, portal_url, html, forms=forms)
 
@@ -940,23 +969,30 @@ def handle_generic(portal_url, html, ticket=None, username=None, password=None,
                     dbg('[Generic] Found status URL: %s' % _status_url)
                     break
 
-    if not best:
-        # No form found — nothing left to submit, run connectivity check
-        log('[Generic] No login form found — verifying connectivity')
+    if not best or not _should_follow_form(best, best_score, _submitted, _depth):
+        log('[Generic] No further login form — verifying connectivity')
         if _connectivity_ok(opener, status_url=_status_url):
             log('[Generic] Connectivity confirmed')
             return True
         log('[Generic] Login outcome unclear')
         return False
 
-    log('[Generic] Form: method=%s action=%r  fields=%s' % (
-        best['method'], best['action'], list(best['fields'].keys())))
+    log('[Generic] Form: method=%s action=%r  fields=%s  score=%d' % (
+        best['method'], best['action'], list(best['fields'].keys()), best_score))
 
     data = fill_form(best, ticket=ticket, username=username, password=password)
     action_url = resolve_action(portal_url, best['action'])
 
     log('[Generic] Submitting to %s' % action_url)
     log('[Generic] POST data: %s' % {k: v for k, v in data.items() if 'pass' not in k.lower()})
+
+    # Track what has been submitted so far for the next depth level
+    fields = best['fields']
+    if any(f['type'] == 'password' or _TICKET_RE.search(n) or _USER_RE.search(n)
+           for n, f in fields.items()):
+        _submitted['credentials'] = True
+    if any(f['type'] == 'checkbox' for f in fields.values()):
+        _submitted['checkbox'] = True
 
     if best['method'] == 'POST':
         body2, final2, _ = http_post(action_url, data, opener=opener,
@@ -975,16 +1011,16 @@ def handle_generic(portal_url, html, ticket=None, username=None, password=None,
         log('[Generic] Login failed — failure keyword in response')
         return False
 
-    # If the response contains another login form and we have recursion budget,
-    # follow it rather than running a connectivity check prematurely
+    # Check for a further form step within recursion budget
     if body2 and _depth < 3:
-        forms2, best2 = parse_forms(body2)
-        if _has_login_form(forms2):
-            log('[Generic] Another login form detected — following (depth %d)' % (_depth + 1))
+        forms2, best2, best2_score = parse_forms(body2)
+        if best2 and _should_follow_form(best2, best2_score, _submitted, _depth + 1):
+            log('[Generic] Another form detected — following (depth %d)' % (_depth + 1))
             return handle_generic(final2, body2, ticket=ticket,
                                   username=username, password=password,
                                   opener=opener, jar=jar,
-                                  _depth=_depth + 1, _status_url=_status_url)
+                                  _depth=_depth + 1, _status_url=_status_url,
+                                  _submitted=_submitted)
 
     # No more login forms — verify actual connectivity
     if _connectivity_ok(opener, status_url=_status_url):
@@ -993,6 +1029,7 @@ def handle_generic(portal_url, html, ticket=None, username=None, password=None,
 
     log('[Generic] Login outcome unclear')
     return False
+
 
 # ── Dispatcher ────────────────────────────────────────────────────────────────
 

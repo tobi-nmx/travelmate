@@ -245,14 +245,25 @@ See `magic.d/bahn.py` for a real-world example covering two portal backends
 
 ## Known portal quirks
 
-**Success detection — form presence over keyword matching** — the generic
-handler does not try to detect success from response keywords. Instead it asks:
-*is there another login form in the response?* A form qualifies as a pending
-login step if it contains a password field, a checkbox, a submit button, or a
-field name matching the ticket/user patterns. Pure GET search forms are ignored.
+**Success detection — form presence and state tracking** — the generic
+handler does not detect success from response keywords. Instead it asks: *should
+we follow the next form, or are we done?* This decision is made by
+`_should_follow_form()` using three inputs:
 
-If no login form is found, `_connectivity_ok()` is called to verify actual
-internet access — the only truly reliable signal.
+1. **Form score** from `best_form()` — login-relevant fields (password, user,
+   ticket, checkbox, non-logout submit button) score positively; logout forms
+   score -3 and are never followed.
+2. **Submitted state** — tracks whether credentials and/or a checkbox have
+   already been submitted in previous steps. Once both have been submitted,
+   no further form is expected and `_connectivity_ok()` is called directly.
+3. **Recursion depth** — the minimum score required to follow a form rises
+   with depth (depth 0: any positive score; depth 1: need a real login signal;
+   depth 2: only strong signals). This reduces the risk of accidentally
+   following a post-login logout form or survey.
+
+In `--debug` mode `_should_follow_form()` always returns `True` (with a log
+warning) so that the complete portal flow is captured for YAML development —
+even steps that would be skipped in normal operation.
 
 `FAILURE_WORDS` are still checked after every form submission and trigger an
 immediate abort if a clear failure message is detected (wrong password, session
