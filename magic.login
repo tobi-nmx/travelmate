@@ -916,13 +916,17 @@ def _run_yaml_handler(handler, portal_url, html, ticket, username, password):
 
 
 
-def _should_follow_form(best, score, submitted, depth):
-    # Minimum score required to follow a form, rising with each recursion level:
-    #   depth 0 - any positive score (CONNECT button etc.)
-    #   depth 1 - need a real login signal (checkbox, ticket, user field)
-    #   depth 2 - only strong signals (password, user+ticket combination)
+def _should_follow_form(best, score, submitted):
+    # Stop if the form scores zero or below — covers logout forms (score -3
+    # via _LOGOUT_RE) and any other form with no recognisable login signal.
     # In --debug mode always follow so the full portal flow is captured.
-    min_score = depth
+    if score <= 0:
+        if DEBUG:
+            log('[Generic] DEBUG: score %d — following anyway for debug capture'
+                % score)
+            return True
+        dbg('[Generic] Score %d — not a login form, stopping' % score)
+        return False
 
     # After both credentials and a checkbox have been submitted, nothing
     # further is expected — stop unless we are in debug mode.
@@ -931,15 +935,6 @@ def _should_follow_form(best, score, submitted, depth):
             log('[Generic] DEBUG: credentials+checkbox already submitted — '
                 'following next form anyway for debug capture')
             return True
-        return False
-
-    if score < min_score:
-        if DEBUG:
-            log('[Generic] DEBUG: score %d below threshold %d at depth %d — '
-                'following anyway for debug capture' % (score, min_score, depth))
-            return True
-        dbg('[Generic] Score %d below threshold %d at depth %d — stopping'
-            % (score, min_score, depth))
         return False
 
     return True
@@ -969,7 +964,7 @@ def handle_generic(portal_url, html, ticket=None, username=None, password=None,
                     dbg('[Generic] Found status URL: %s' % _status_url)
                     break
 
-    if not best or not _should_follow_form(best, best_score, _submitted, _depth):
+    if not best or not _should_follow_form(best, best_score, _submitted):
         log('[Generic] No further login form — verifying connectivity')
         if _connectivity_ok(opener, status_url=_status_url):
             log('[Generic] Connectivity confirmed')
@@ -1014,7 +1009,7 @@ def handle_generic(portal_url, html, ticket=None, username=None, password=None,
     # Check for a further form step within recursion budget
     if body2 and _depth < 3:
         forms2, best2, best2_score = parse_forms(body2)
-        if best2 and _should_follow_form(best2, best2_score, _submitted, _depth + 1):
+        if best2 and _should_follow_form(best2, best2_score, _submitted):
             log('[Generic] Another form detected — following (depth %d)' % (_depth + 1))
             return handle_generic(final2, body2, ticket=ticket,
                                   username=username, password=password,

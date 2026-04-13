@@ -245,14 +245,15 @@ See `magic.d/bahn.py` for a real-world example covering two portal backends
 
 ## Known portal quirks
 
-**Success detection — form presence and state tracking** — the generic
+**Success detection — form score and submitted state** — the generic
 handler does not detect success from response keywords. Instead it asks: *should
 we follow the next form, or are we done?* This decision is made by
-`_should_follow_form()` using three inputs:
+`_should_follow_form()` using two inputs:
 
 1. **Form score** from `best_form()` — login-relevant fields (password, user,
    ticket, checkbox, non-logout submit button) score positively; logout forms
-   score -3 and are never followed.
+   score -3 via `_LOGOUT_RE` and are never followed; any form scoring ≤ 0 is
+   ignored.
 2. **Submitted state** — tracks whether credentials and/or a checkbox have
    already been submitted in previous steps. Once both have been submitted,
    no further form is expected and `_connectivity_ok()` is called directly.
