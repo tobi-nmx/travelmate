@@ -295,7 +295,7 @@ HEADERS = {
     'Connection':      'keep-alive',
 }
 
-HANDLERS_DIR = '/etc/travelmate/magic.d'
+HANDLERS_DIR = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 'magic.d')
 TRM_RUNTIME  = '/tmp/trm_runtime.json'
 CREDS_FILE   = '/etc/captive-credentials.conf'
 
