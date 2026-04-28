@@ -22,11 +22,12 @@ Cron usage (re-login when session expires, e.g. every 5 minutes):
   Use --force to always run the full login flow regardless.
 
 Handler configuration:
-  YAML files in /etc/travelmate/captive.d/ describe portal-specific login flows.
-  Each file declares match patterns and a list of form-submission steps.
-  Portals not matched by any YAML file fall back to the built-in generic handler.
+  YAML files in magic.d/ (relative to this script) describe portal-specific
+  login flows. Each file declares match patterns and a list of form-submission
+  steps. Portals not matched by any YAML file fall back to the built-in generic
+  handler.
 
-  Install a new handler:    drop a .yaml file into /etc/travelmate/captive.d/
+  Install a new handler:    drop a .yaml file into magic.d/
   Disable a handler:        rename the file to .yaml.disabled
 
 Travelmate integration:
@@ -208,6 +209,11 @@ DEBUG_DIR     = _os.path.join(_TMP_DIR, 'captive-debug')
 def _init_debug():
     global _debug_log_fh
     _os.makedirs(DEBUG_DIR, exist_ok=True)
+    # Clear stale files from previous runs so old step_*.html files do not
+    # linger and confuse analysis when the new run has fewer steps.
+    for _f in _os.listdir(DEBUG_DIR):
+        if _f.endswith('.html') or _f.endswith('.log'):
+            _os.remove(_os.path.join(DEBUG_DIR, _f))
     path = '%s/session.log' % DEBUG_DIR
     _debug_log_fh = open(path, 'w', buffering=1)
     log('[debug] Writing debug log to %s' % path)
@@ -295,6 +301,8 @@ HEADERS = {
     'Connection':      'keep-alive',
 }
 
+# magic.d/ is always resolved relative to this script so the same installation
+# works on both OpenWrt (/etc/travelmate/) and Termux (~/travelmate/).
 HANDLERS_DIR = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 'magic.d')
 TRM_RUNTIME  = '/tmp/trm_runtime.json'
 CREDS_FILE   = '/etc/captive-credentials.conf'
