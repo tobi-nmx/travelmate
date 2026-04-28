@@ -10,6 +10,9 @@
 #   CNA (local)         — DB stations and some regional trains
 #                         Vue SPA frontend, REST API at /services/cna-portal/v1/
 #                         api_type from /config determines the auth method.
+#                         /config may return 404 on some deployments — in that
+#                         case api_type defaults to 'local' and /cna/logon is
+#                         used directly.
 #
 #   CNA (Ombord)        — Some trains use the CNA frontend but Ombord backend
 #                         (api_type = 'ombord' or 'emailreg')
@@ -59,11 +62,11 @@ def handle(portal_url, html, ticket=None, username=None, password=None):
 
 def _handle_ombord(portal_url, ticket=None):
     """DB ICE (Ombord backend) — MAC-based, no form needed."""
-    log    = _ctx['log']
-    dbg    = _ctx['dbg']
-    http_get   = _ctx['http_get']
+    log          = _ctx['log']
+    dbg          = _ctx['dbg']
+    http_get     = _ctx['http_get']
     _make_opener = _ctx['_make_opener']
-    time   = _ctx['time']
+    time         = _ctx['time']
     urllib_parse = _ctx['urllib_parse']
 
     log('[DB/Ombord] Logging in via Ombord CGI')
@@ -107,18 +110,24 @@ def _handle_cna(portal_url, ticket=None, username=None, password=None):
     base   = origin_of(portal_url)
     opener, _ = _make_opener()
 
-    # 1. Fetch portal config to determine api_type
-    cfg_body, _, _ = http_get('%s/services/cna-portal/v1/config' % base,
-                              opener=opener, _dbg_label='db_cna_config')
+    # 1. Fetch portal config to determine api_type.
+    #    /config may return 404 on some deployments (e.g. DB stations) — in
+    #    that case we skip api_type detection and go straight to /cna/logon.
+    cfg_body, _, cfg_resp = http_get('%s/services/cna-portal/v1/config' % base,
+                                     opener=opener, _dbg_label='db_cna_config')
     api_type = 'local'
     if cfg_body:
-        try:
-            api_type = (json.loads(cfg_body)
-                        .get('result', {})
-                        .get('api_type', 'local'))
-            log('[DB/CNA] api_type = %s' % api_type)
-        except Exception:
-            log('[DB/CNA] Could not parse config, assuming local')
+        if isinstance(cfg_resp, urllib_error.HTTPError):
+            log('[DB/CNA] /config returned HTTP %d — assuming api_type=local'
+                % cfg_resp.code)
+        else:
+            try:
+                api_type = (json.loads(cfg_body)
+                            .get('result', {})
+                            .get('api_type', 'local'))
+                log('[DB/CNA] api_type = %s' % api_type)
+            except Exception:
+                log('[DB/CNA] Could not parse config JSON — assuming api_type=local')
 
     # 2. ICE trains that use the CNA frontend but Ombord backend
     if api_type in ('ombord', 'emailreg'):
