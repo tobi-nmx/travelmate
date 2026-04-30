@@ -230,7 +230,7 @@ def dbg(msg):
     if DEBUG:
         log('[DBG] %s' % msg)
 
-def dbg_html(label, url, html, forms=None, cookies=None, headers=None):
+def dbg_html(label, url, html, forms=None, cookies=None, headers=None, opener=None):
     if not DEBUG:
         return
     global _debug_step
@@ -267,6 +267,52 @@ def dbg_html(label, url, html, forms=None, cookies=None, headers=None):
                    if k.lower() in ('location','set-cookie','content-type','x-cache','server')}
         if notable:
             dbg('Notable headers: %s' % notable)
+    # Fetch and save JS files referenced in this page so portal API logic
+    # is captured. The same opener is used so portal session cookies are
+    # sent, which is required by portals that gate their JS behind auth.
+    _dbg_fetch_scripts(html, url, opener)
+
+
+# Tracks URLs already fetched in this debug session to avoid duplicates.
+_dbg_fetched_scripts = set()
+
+def _dbg_fetch_scripts(html, base_url, opener=None):
+    """Fetch every <script src> URL found in html and save to DEBUG_DIR.
+
+    Uses the provided opener (same cookie jar as the portal session) so that
+    portals which require an authenticated session to serve their JS files
+    receive the correct cookies. Falls back to a fresh opener if none given.
+    Only runs in --debug mode; each unique URL is fetched at most once per run.
+    """
+    if not html:
+        return
+    for m in re.finditer(r'<script[^>]+\bsrc=["\']([^"\']+)["\']', html, re.I):
+        src = m.group(1)
+        # Skip inline data URIs and obviously non-JS blobs
+        if src.startswith('data:'):
+            continue
+        url = urllib.parse.urljoin(base_url, src)
+        if url in _dbg_fetched_scripts:
+            continue
+        _dbg_fetched_scripts.add(url)
+        try:
+            _opener = opener or _make_opener()[0]
+            resp = _opener.open(url, timeout=PROBE_TIMEOUT)
+            body = resp.read().decode('utf-8', errors='replace')
+            if len(body) < 50:
+                dbg('[dbg-scripts] Skipped (too short / likely redirect): %s' % url)
+                continue
+            fname = _os.path.basename(urllib.parse.urlparse(url).path) or 'script.js'
+            # Avoid clobbering if two pages reference files with the same basename
+            out = _os.path.join(DEBUG_DIR, fname)
+            if _os.path.exists(out):
+                base, ext = _os.path.splitext(fname)
+                out = _os.path.join(DEBUG_DIR, '%s_%d%s' % (base, _debug_step, ext))
+            with open(out, 'w') as f:
+                f.write(body)
+            dbg('[dbg-scripts] Saved %s -> %s (%d bytes)' % (url, _os.path.basename(out), len(body)))
+        except Exception as e:
+            dbg('[dbg-scripts] Failed to fetch %s: %s' % (url, e))
 
 def die(msg, code=1):
     print('ERROR: %s' % msg, file=sys.stderr, flush=True)
@@ -393,7 +439,7 @@ def http_get(url, opener=None, timeout=TIMEOUT, _dbg_label=None):
         body = resp.read().decode('utf-8', errors='replace')
         final = resp.geturl()
         if _dbg_label and body:
-            dbg_html(_dbg_label, final, body, headers=resp.headers)
+            dbg_html(_dbg_label, final, body, headers=resp.headers, opener=opener)
         elif final != url:
             dbg('  -> redirected to %s' % final)
         return body, final, resp
@@ -401,7 +447,7 @@ def http_get(url, opener=None, timeout=TIMEOUT, _dbg_label=None):
         body = e.read().decode('utf-8', errors='replace')
         dbg('  HTTP %d error' % e.code)
         if _dbg_label and body:
-            dbg_html('%s_err%d' % (_dbg_label, e.code), url, body, headers=e.headers)
+            dbg_html('%s_err%d' % (_dbg_label, e.code), url, body, headers=e.headers, opener=opener)
         return body, url, e
     except Exception as e:
         dbg('  Exception: %s' % e)
@@ -435,13 +481,13 @@ def http_post(url, data, opener=None, timeout=TIMEOUT,
         if final != url:
             dbg('  -> redirected to %s' % final)
         if _dbg_label and body:
-            dbg_html(_dbg_label, final, body, headers=resp.headers)
+            dbg_html(_dbg_label, final, body, headers=resp.headers, opener=opener)
         return body, final, resp
     except urllib.error.HTTPError as e:
         body = e.read().decode('utf-8', errors='replace')
         dbg('  HTTP %d error' % e.code)
         if _dbg_label and body:
-            dbg_html('%s_err%d' % (_dbg_label, e.code), url, body, headers=e.headers)
+            dbg_html('%s_err%d' % (_dbg_label, e.code), url, body, headers=e.headers, opener=opener)
         return body, url, e
     except Exception as e:
         dbg('  Exception: %s' % e)
@@ -716,6 +762,7 @@ def _make_plugin_ctx():
         'time':         time,
         'urllib_parse': urllib.parse,
         'urllib_error': urllib.error,
+        'HEADERS':      HEADERS,
     }
 
 
@@ -845,7 +892,8 @@ def _run_yaml_handler(handler, portal_url, html, ticket, username, password):
         if DEBUG and current_html:
             dbg_html('%s_%s' % (name.replace(' ','_'), label),
                      current_url, current_html, forms=forms,
-                     cookies={c.name: c.value for c in jar})
+                     cookies={c.name: c.value for c in jar},
+                     opener=opener)
 
         action_cfg = step.get('action', 'from_form')
         if action_cfg == 'from_form':
@@ -961,7 +1009,8 @@ def handle_generic(portal_url, html, ticket=None, username=None, password=None,
 
     forms, best, best_score = parse_forms(html)
     if DEBUG:
-        dbg_html('generic_depth%d' % _depth, portal_url, html, forms=forms)
+        dbg_html('generic_depth%d' % _depth, portal_url, html, forms=forms,
+                 opener=opener)
 
     # Extract status URL from form fields on the first call (Mikrotik/Coova pattern)
     if _status_url is None:
@@ -1152,3 +1201,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
