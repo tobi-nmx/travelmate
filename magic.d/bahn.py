@@ -36,6 +36,34 @@ _ctx = {}   # populated by dispatcher: log, dbg, http_get, http_post,
             # urllib_parse, urllib_error
 
 
+def _make_legacy_ssl_opener():
+    """Return an opener that tolerates legacy TLS renegotiation.
+
+    wifi.bahn.de uses unsafe legacy renegotiation which Python's ssl module
+    rejects by default since OpenSSL 3.0. OP_LEGACY_SERVER_CONNECT re-enables
+    it for this specific opener without affecting the rest of the script.
+    Falls back to a standard opener if the option is unavailable (older OpenSSL).
+    """
+    import ssl as _ssl
+    import urllib.request as _ur
+    import http.cookiejar as _cj
+    _make_opener = _ctx['_make_opener']
+    try:
+        ctx = _ssl.create_default_context()
+        ctx.options |= _ssl.OP_LEGACY_SERVER_CONNECT
+        jar = _cj.CookieJar()
+        opener = _ur.build_opener(
+            _ur.HTTPCookieProcessor(jar),
+            _ur.HTTPSHandler(context=ctx),
+        )
+        opener.addheaders = list(_ctx['HEADERS'].items())
+        return opener, jar
+    except AttributeError:
+        # OP_LEGACY_SERVER_CONNECT not available — fall back to standard opener
+        _ctx['dbg']('[DB] OP_LEGACY_SERVER_CONNECT unavailable, using standard opener')
+        return _make_opener()
+
+
 def can_handle(portal_url, html):
     ul = portal_url.lower()
     h  = (html or '').lower()
@@ -70,7 +98,7 @@ def _handle_ombord(portal_url, ticket=None):
     urllib_parse = _ctx['urllib_parse']
 
     log('[DB/Ombord] Logging in via Ombord CGI')
-    opener, _ = _make_opener()
+    opener, _ = _make_legacy_ssl_opener()
     venue_enc   = urllib_parse.quote(portal_url, safe='')
     onerror_enc = urllib_parse.quote(portal_url + '?onerror=true', safe='')
     login_url   = ('https://www.ombord.info/hotspot/hotspot.cgi?method=login'
@@ -108,7 +136,7 @@ def _handle_cna(portal_url, ticket=None, username=None, password=None):
 
     log('[DB/CNA] Detected DB CNA portal')
     base   = origin_of(portal_url)
-    opener, _ = _make_opener()
+    opener, _ = _make_legacy_ssl_opener()
 
     # 1. Fetch portal config to determine api_type.
     #    /config may return 404 on some deployments (e.g. DB stations) — in
@@ -149,3 +177,4 @@ def _handle_cna(portal_url, ticket=None, username=None, password=None):
     )
     log('[DB/CNA] Logon response from %s' % final)
     return body is not None and not isinstance(resp, urllib_error.HTTPError)
+
