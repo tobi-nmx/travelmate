@@ -1,0 +1,43 @@
+# Marriott hotel captive portal handler
+# ──────────────────────────────────────
+# Antlabs IG-based portal used in Marriott conference/hotel WiFi.
+# The login page is served from a local AP at 10.254.254.254 and posts
+# credentials to a separate radius/auth host on port 9997.
+#
+# The form has an unusual field layout:
+#   username  type=password  — the guest access code is entered here
+#   password  type=hidden    — fixed value "Hotspot", supplied by the portal
+#
+# Because the access-code field is type=password, fill_form() would normally
+# fill it with the password argument. The fix in magic.login extends the
+# single-empty-field fallback to also consider type=password fields when
+# placing an unmatched ticket, so the ticket lands in username correctly.
+#
+# Provide the access code as the ticket argument:
+#   magic.login --force <access-code>
+# or via the credentials file:
+#   Hotspot*  ticket  <access-code>
+#
+# Number of login steps: 1
+# SSID: Hotspot Conf (varies by property)
+# Portal URL: http://10.254.254.254/HTML/free/login.html
+
+name: Marriott
+priority: 30
+
+match:
+  - /HTML/free/login.html
+  - MarriottLogo
+
+retry_delays: [2, 3, 5, 5]
+
+steps:
+  - label: login
+    action: from_form
+    fields: from_form
+    # Only fire when the form action points to the Antlabs auth port 9997,
+    # to avoid matching other portals whose intercept page happens to contain
+    # the match patterns above (e.g. another hotel using the same AP firmware
+    # without Marriott branding).
+    only_if_action: "9997"
+
