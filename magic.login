@@ -165,10 +165,13 @@ def _fast_online_check():
                           '(expected 204)' % code, flush=True)
                 return False
             else:
-                if expected in body:
+                # Exact match required: a portal intercept page may contain the
+                # expected string as a substring (e.g. "success" in an error
+                # message or URL), which would produce a false positive.
+                if body.strip() == expected:
                     return True
-                print('[fast-check] Expected %r not in response — portal intercept'
-                      % expected, flush=True)
+                print('[fast-check] Expected exact %r, got %r — portal intercept'
+                      % (expected, body[:40]), flush=True)
                 return False
 
         except Exception as e:
@@ -530,7 +533,7 @@ def detect_portal():
                 if resp.status == 204 and body == '':
                     log('[detect] Already online (204 No Content)')
                     return None, None
-            elif expected in body:
+            elif body.strip() == expected:
                 log('[detect] Already online (probe succeeded without redirect)')
                 return None, None
             # No redirect, but response doesn't match expected signature —
@@ -624,10 +627,13 @@ def _connectivity_ok(opener=None, status_url=None):
                 return True
             log('[connectivity]   ✗ Expected empty 204 body')
         else:
-            if body is not None and expected in body:
-                log('[connectivity] ✓ Online (found %r)' % expected)
+            # Exact match required: a portal intercept page may contain the
+            # expected string as a substring (e.g. "success" in an error
+            # message or URL), which would produce a false positive.
+            if body is not None and body.strip() == expected:
+                log('[connectivity] ✓ Online (exact match %r)' % expected)
                 return True
-            log('[connectivity]   ✗ Expected %r not in body' % expected)
+            log('[connectivity]   ✗ Expected exact %r, got %r' % (expected, (body or '')[:40]))
     if status_url and _status_page_ok(status_url, opener):
         return True
     log('[connectivity] ✗ All probes failed — not online')
@@ -762,8 +768,12 @@ def fill_form(form, ticket=None, username=None, password=None):
         else:
             data[name] = val
     if ticket and not ticket_placed:
+        # Include type=password fields in the fallback search: some portals
+        # (e.g. Marriott) use a password-typed input as the sole access-code
+        # entry field, so the normal _VISIBLE_INPUT_TYPES set is too narrow.
+        _fallback_types = _VISIBLE_INPUT_TYPES | {'password'}
         empty = [n for n, f in form['fields'].items()
-                 if f['type'] in _VISIBLE_INPUT_TYPES and not data.get(n)]
+                 if f['type'] in _fallback_types and not data.get(n)]
         if len(empty) == 1:
             data[empty[0]] = ticket
     if username and not username_placed and not ticket_placed:
