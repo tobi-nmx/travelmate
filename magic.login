@@ -165,10 +165,13 @@ def _fast_online_check():
                           '(expected 204)' % code, flush=True)
                 return False
             else:
-                if expected in body:
+                # Exact match required: a portal intercept page may contain the
+                # expected string as a substring (e.g. "success" in an error
+                # message or URL), which would produce a false positive.
+                if body.strip() == expected:
                     return True
-                print('[fast-check] Expected %r not in response — portal intercept'
-                      % expected, flush=True)
+                print('[fast-check] Expected exact %r, got %r — portal intercept'
+                      % (expected, body[:40]), flush=True)
                 return False
 
         except Exception as e:
@@ -499,6 +502,25 @@ def origin_of(url):
 
 # ── Portal detection ──────────────────────────────────────────────────────────
 
+def _extract_redirect_url(html, base_url):
+    """
+    Extract a redirect URL from a portal intercept page that uses meta-refresh
+    or a JS location assignment instead of a proper HTTP redirect.
+    Handles patterns used by Marriott and similar portals.
+    """
+    if not html:
+        return None
+    # meta http-equiv refresh: content='0;url="http://..."' or content='0;url=http://...'
+    m = re.search(r'<meta[^>]+http-equiv=["\']?refresh["\']?[^>]+content=["\']'
+                  r'\d+;\s*url=["\']?([^"\'>\s]+)["\']?', html, re.I)
+    if m:
+        return urllib.parse.urljoin(base_url, m.group(1).strip('"\''))
+    # JS: location.href='http://...' or location.href="http://..."
+    m = re.search(r'location\.href\s*=\s*["\']([^"\']+)["\']', html)
+    if m:
+        return urllib.parse.urljoin(base_url, m.group(1))
+    return None
+
 def detect_portal():
     no_redir, _ = _make_opener(follow_redirects=False)
     for probe in PROBE_URLS:
@@ -507,18 +529,25 @@ def detect_portal():
             body = resp.read().decode('utf-8', errors='replace')
             expected = ONLINE_SIGNATURES.get(probe)
             if expected is None:
-                if body == '':
+                # generate_204: must be HTTP 204 with strictly empty body
+                if resp.status == 204 and body == '':
                     log('[detect] Already online (204 No Content)')
                     return None, None
             elif expected in body:
                 log('[detect] Already online (probe succeeded without redirect)')
                 return None, None
-            final = resp.geturl()
-            if final != probe:
-                log('[detect] Redirect to %s' % final)
-                html, fu, _ = http_get(final, _dbg_label='detect_portal')
+            # No redirect, but response doesn't match expected signature —
+            # treat as portal intercept (e.g. Marriott returns HTTP 200 + HTML
+            # with a meta-refresh instead of a proper HTTP redirect).
+            log('[detect] Unexpected response from %s (HTTP %d, %d bytes) '
+                '— treating as portal intercept' % (probe, resp.status, len(body)))
+            # Follow meta-refresh or JS location redirect if present
+            portal_url = _extract_redirect_url(body, resp.geturl())
+            if portal_url:
+                log('[detect] Portal redirect (meta-refresh): %s' % portal_url)
+                html, fu, _ = http_get(portal_url, _dbg_label='detect_portal')
                 return fu, html
-            return None, None
+            return resp.geturl(), body
         except urllib.error.HTTPError as e:
             loc = e.headers.get('Location') or e.headers.get('location') or ''
             if loc:
@@ -598,10 +627,13 @@ def _connectivity_ok(opener=None, status_url=None):
                 return True
             log('[connectivity]   ✗ Expected empty 204 body')
         else:
-            if body is not None and expected in body:
-                log('[connectivity] ✓ Online (found %r)' % expected)
+            # Exact match required: a portal intercept page may contain the
+            # expected string as a substring (e.g. "success" in an error
+            # message or URL), which would produce a false positive.
+            if body is not None and body.strip() == expected:
+                log('[connectivity] ✓ Online (exact match %r)' % expected)
                 return True
-            log('[connectivity]   ✗ Expected %r not in body' % expected)
+            log('[connectivity]   ✗ Expected exact %r, got %r' % (expected, (body or '')[:40]))
     if status_url and _status_page_ok(status_url, opener):
         return True
     log('[connectivity] ✗ All probes failed — not online')
@@ -727,8 +759,12 @@ def fill_form(form, ticket=None, username=None, password=None):
         else:
             data[name] = val
     if ticket and not ticket_placed:
+        # Include type=password fields in the fallback search: some portals
+        # (e.g. Marriott) use a password-typed input as the sole access-code
+        # entry field, so the normal _VISIBLE_INPUT_TYPES set is too narrow.
+        _fallback_types = _VISIBLE_INPUT_TYPES | {'password'}
         empty = [n for n, f in form['fields'].items()
-                 if f['type'] in _VISIBLE_INPUT_TYPES and not data.get(n)]
+                 if f['type'] in _fallback_types and not data.get(n)]
         if len(empty) == 1:
             data[empty[0]] = ticket
     if username and not username_placed and not ticket_placed:
