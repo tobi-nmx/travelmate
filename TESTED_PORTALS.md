@@ -22,6 +22,7 @@ longer works — please [open an issue](../../issues/new).
 | Vodafone Hotspot | VodafoneWifi* | generic | DE | ❓ untested | Captive portal with T&C splash, short free session, optional extension via Hotspot flat or ticket |
 | Hotsplots | varies | generic | DE | ❓ untested | Splash page with T&C checkbox, often plus voucher/ticket field depending on location |
 | McDonald's / The Cloud | McDonaldsWifi | generic | EU | ❓ untested | Provider-managed splash page with T&C accept; sometimes minimal form (e.g. name/email) |
+| Marriott hotel | Hotspot Conf | magic.d/marriott.py | DE (Munich Airport) | ✅ tested | Antlabs IG; access code as ticket arg |
 | Autobahn / Tank & Rast | varies | generic | DE | ❓ untested | Typically simple redirect-based captive portals; implementations vary by operator and location |
 | Frankfurt Airport (FRA) | FRA Free WiFi | generic | DE | ❓ untested | Redirect to portal with T&C button, then time-limited session |
 | Munich Airport (MUC) | MUC Free WiFi | generic | DE | ❓ untested | Browser-based portal with email and T&C accept, then unlimited free Wi-Fi |
