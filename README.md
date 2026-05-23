@@ -105,11 +105,11 @@ For setups with many SSIDs, or when you prefer to manage all credentials in one
 place, create `/etc/captive-credentials.conf`:
 
 ```
-# SSID pattern (fnmatch wildcards)   type       credential(s)
-Telekom_FON_*                        userpass   your@t-online.de   yourpassword
-VodafoneWifi*                        userpass   myuser             mypassword
-CoffeeShop_WLAN                      ticket     ABCD-1234
-*                                    free
+# SSID pattern (fnmatch wildcards)   credential(s)
+Telekom_FON_*                        your@t-online.de   yourpassword
+VodafoneWifi*                        myuser             mypassword
+CoffeeShop_WLAN                      ABCD-1234
+# No entry needed for free/checkbox portals — absence is the default.
 ```
 
 The script reads the active SSID from Travelmate's runtime JSON and matches it

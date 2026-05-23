@@ -1176,20 +1176,20 @@ def load_credentials(ssid):
                 if not line or line.startswith('#'):
                     continue
                 parts = line.split()
-                if len(parts) < 2:
+                if len(parts) < 1:
                     continue
-                pattern, ctype = parts[0], parts[1].lower()
+                pattern = parts[0]
                 if not fnmatch(ssid, pattern):
                     continue
-                if ctype == 'userpass' and len(parts) >= 4:
-                    log('[creds] Matched SSID %r -> userpass for %r' % (ssid, parts[2]))
-                    return None, parts[2], parts[3]
-                if ctype == 'ticket' and len(parts) >= 3:
-                    log('[creds] Matched SSID %r -> ticket' % ssid)
-                    return parts[2], None, None
-                if ctype == 'free':
+                creds = parts[1:]
+                if len(creds) == 0:
                     log('[creds] Matched SSID %r -> free' % ssid)
                     return None, None, None
+                if len(creds) == 1:
+                    log('[creds] Matched SSID %r -> ticket' % ssid)
+                    return creds[0], None, None
+                log('[creds] Matched SSID %r -> userpass for %r' % (ssid, creds[0]))
+                return None, creds[0], creds[1]
     except FileNotFoundError:
         pass
     except Exception as e:
