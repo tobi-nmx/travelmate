@@ -416,14 +416,43 @@ class _BoundHTTPHandler(urllib.request.HTTPHandler):
 _UPLINK_IFACE = _detect_uplink_iface()
 
 
-def _make_jar():
-    return http.cookiejar.CookieJar()
+class _PermissiveCookiePolicy(http.cookiejar.DefaultCookiePolicy):
+    """Cookie policy that sends cookies to any domain.
 
-def _make_opener(jar=None, follow_redirects=True):
+    The standard DefaultCookiePolicy enforces RFC 2965 domain matching, which
+    prevents cookies set by cp.marinawifi.it from being sent to
+    captiveportal-login.marinadivenezia.it.  Captive portal relay flows
+    (e.g. Antlabs/MarinaWiFi) require the session cookie from the portal
+    cloud server to be forwarded to the AP backend on a different domain.
+    This policy disables domain checking so the full cookie jar is sent to
+    every HTTPS host in the session.
+    """
+    def return_ok_domain(self, cookie, request):
+        return True
+    def domain_return_ok(self, domain, request):
+        return True
+    def set_ok_domain(self, cookie, request):
+        return True
+
+
+def _make_jar():
+    return http.cookiejar.CookieJar(policy=_PermissiveCookiePolicy())
+
+def _make_opener(jar=None, follow_redirects=True, ssl_verify=True):
     jar = jar or _make_jar()
     handlers = [urllib.request.HTTPCookieProcessor(jar)]
     if not follow_redirects:
         handlers.append(_NoRedirect())
+    if not ssl_verify:
+        # Disable certificate verification for portals with self-signed certs
+        # (e.g. captiveportal-login.marinadivenezia.it).  Only used when the
+        # portal explicitly requires it — never applied to probe URLs.
+        import ssl as _ssl
+        ctx = _ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = _ssl.CERT_NONE
+        handlers.append(urllib.request.HTTPSHandler(context=ctx))
+        dbg('SSL certificate verification disabled for this opener')
     if _UPLINK_IFACE and not _NO_BIND:
         handlers.append(_BoundHTTPHandler(_UPLINK_IFACE))
         dbg('Binding HTTP requests to interface: %s' % _UPLINK_IFACE)
@@ -493,6 +522,36 @@ def http_post(url, data, opener=None, timeout=TIMEOUT,
             dbg_html('%s_err%d' % (_dbg_label, e.code), url, body, headers=e.headers, opener=opener)
         return body, url, e
     except Exception as e:
+        # Retry once with SSL verification disabled if the failure looks like
+        # a certificate error (self-signed cert on captive portal backends).
+        # Only retried when the original opener used the default ssl_verify=True
+        # so we never silently disable SSL for deliberate no-verify callers.
+        import ssl as _ssl
+        if (isinstance(e, _ssl.SSLError) or
+                (hasattr(e, 'reason') and isinstance(getattr(e, 'reason', None), _ssl.SSLError))):
+            dbg('  SSL error — retrying without certificate verification')
+            no_verify_opener, _ = _make_opener(ssl_verify=False)
+            no_verify_opener.addheaders = opener.addheaders
+            try:
+                # Build a fresh Request object: the original req body stream
+                # may be exhausted after the first open() attempt, causing an
+                # empty POST body and a 404 on retry.
+                req2 = urllib.request.Request(url, data=payload)
+                req2.add_header('Content-Type', content_type)
+                if extra_headers:
+                    for k, v in extra_headers.items():
+                        req2.add_header(k, v)
+                resp2 = no_verify_opener.open(req2, timeout=timeout)
+                body2 = resp2.read().decode('utf-8', errors='replace')
+                final2 = resp2.geturl()
+                log('  SSL cert untrusted on %s — proceeding without verification' % url)
+                if _dbg_label and body2:
+                    dbg_html(_dbg_label, final2, body2, headers=resp2.headers,
+                             opener=no_verify_opener)
+                return body2, final2, resp2
+            except Exception as e2:
+                dbg('  Retry also failed: %s' % e2)
+                return None, url, e2
         dbg('  Exception: %s' % e)
         return None, url, e
 
@@ -506,19 +565,31 @@ def _extract_redirect_url(html, base_url):
     """
     Extract a redirect URL from a portal intercept page that uses meta-refresh
     or a JS location assignment instead of a proper HTTP redirect.
-    Handles patterns used by Marriott and similar portals.
+    Handles patterns used by Marriott, MarinaWiFi, and similar portals.
+
+    Both sources may contain HTML-entity-encoded ampersands (&amp;), so we
+    always unescape before returning.  The JS location.href is preferred over
+    meta-refresh when both are present: if we already followed one redirect
+    that had &amp;-encoded query parameters, the portal may double-encode the
+    meta-refresh URL (&amp; → &amp;amp;) while the JS string stays correct.
     """
     if not html:
         return None
+    import html as _html_mod
+    # JS: window.top.location.href='...' or location.href="..."
+    # Preferred over meta-refresh — portals that double-encode the meta URL
+    # still produce a correct JS string.
+    m = re.search(r'location\.href\s*=\s*["\']([^"\']+)["\']', html)
+    if m:
+        # JS strings may use \/ as an escaped slash; unescape it after
+        # HTML-entity decoding so urljoin gets a clean path.
+        url = _html_mod.unescape(m.group(1)).replace('\\/', '/')
+        return urllib.parse.urljoin(base_url, url)
     # meta http-equiv refresh: content='0;url="http://..."' or content='0;url=http://...'
     m = re.search(r'<meta[^>]+http-equiv=["\']?refresh["\']?[^>]+content=["\']'
                   r'\d+;\s*url=["\']?([^"\'>\s]+)["\']?', html, re.I)
     if m:
-        return urllib.parse.urljoin(base_url, m.group(1).strip('"\''))
-    # JS: location.href='http://...' or location.href="http://..."
-    m = re.search(r'location\.href\s*=\s*["\']([^"\']+)["\']', html)
-    if m:
-        return urllib.parse.urljoin(base_url, m.group(1))
+        return urllib.parse.urljoin(base_url, _html_mod.unescape(m.group(1).strip('"\'')))
     return None
 
 def detect_portal():
@@ -554,6 +625,17 @@ def detect_portal():
                 loc = urllib.parse.urljoin(probe, loc)
                 log('[detect] Portal redirect: %s' % loc)
                 html, fu, _ = http_get(loc, _dbg_label='detect_portal')
+                # Some portals (e.g. MarinWiFi/Antlabs) respond to the initial
+                # GET with a JS/meta-refresh redirect to the same URL plus a
+                # browser-detection parameter (e.g. &_browser=1).  Follow it
+                # so the actual login form is returned to the dispatcher.
+                if html:
+                    redirect2 = _extract_redirect_url(html, fu)
+                    if redirect2 and redirect2 != fu:
+                        log('[detect] Portal browser-check redirect: %s' % redirect2)
+                        html2, fu2, _ = http_get(redirect2, _dbg_label='detect_portal_browser')
+                        if html2:
+                            return fu2, html2
                 return fu, html
             if e.code == 204:
                 return None, None
@@ -585,13 +667,26 @@ FAILURE_WORDS = [
 ]
 
 def looks_like_failure(html):
-    """Return True if the response clearly indicates a login failure."""
+    """Return True if the response clearly indicates a login failure.
+
+    Searches only the visible text (tags stripped) so that failure keywords
+    embedded in CSS class names, JS string literals, or HTML attributes
+    (e.g. "access denied" in an anti-framing script, "fehler" in a CSS
+    class like "nwaError") do not produce false positives.
+    """
     if html is None:
         return False
-    lower = html.lower()
-    if any(w in lower for w in FAILURE_WORDS):
-        dbg('Failure keyword detected in response')
-        return True
+    import re as _re
+    # Strip <script> and <style> blocks entirely (content is not visible text)
+    # then strip remaining tags, leaving only rendered text.
+    stripped = _re.sub(r'<(script|style)[^>]*>.*?<\/\1>', ' ', html,
+                       flags=_re.I | _re.S)
+    visible = _re.sub(r'<[^>]+>', ' ', stripped)
+    lower = visible.lower()
+    for w in FAILURE_WORDS:
+        if w in lower:
+            dbg('Failure keyword %r detected in visible text' % w)
+            return True
     return False
 
 _STATUS_SUCCESS_WORDS = [
@@ -610,9 +705,18 @@ def _status_page_ok(status_url, opener):
     return False
 
 def _connectivity_ok(opener=None, status_url=None):
+    """Verify actual internet access by probing known URLs.
+
+    generate_204 is treated as the primary probe: if it is redirected by the
+    portal, we are definitely not online regardless of what other probes say.
+    Some portals (e.g. MarinaWiFi/Antlabs) do not intercept secondary probes
+    like detectportal.firefox.com, which would otherwise produce a false
+    positive while the portal is still active.
+    """
     log('[connectivity] Verifying actual internet access ...')
     if opener is None:
         opener, _ = _make_opener()
+    generate_204_redirected = False
     for probe in PROBE_URLS:
         expected = ONLINE_SIGNATURES.get(probe)
         body, final_url, resp = http_get(probe, opener=opener)
@@ -620,6 +724,13 @@ def _connectivity_ok(opener=None, status_url=None):
         log('[connectivity]   url=%s  body=%r' % (final_url, (body or '')[:80]))
         if final_url != probe:
             log('[connectivity]   ✗ Redirected — portal still active')
+            if expected is None:   # generate_204 was redirected
+                generate_204_redirected = True
+            continue
+        if generate_204_redirected:
+            # generate_204 was intercepted by the portal — do not trust any
+            # other probe result, since the portal may not intercept it.
+            log('[connectivity]   ✗ Skipping (generate_204 was redirected)')
             continue
         if expected is None:
             if body == '':
@@ -756,6 +867,18 @@ def fill_form(form, ticket=None, username=None, password=None):
             if field['checked'] or name not in data:
                 data[name] = val
         elif typ == 'password':
+            # Some portals (e.g. MarinWiFi/Antlabs) inject several hidden
+            # password fields with pre-filled decoy values to defeat browser
+            # autofill (e.g. value="no-ff-pwmgr-1").  If any empty password
+            # field exists in the form, treat non-empty ones as decoys and
+            # skip them so only the real field receives the credential.
+            _has_empty_pw = any(
+                f['type'] == 'password' and f['value'] == ''
+                for f in form['fields'].values()
+            )
+            if _has_empty_pw and val:
+                dbg('fill_form: skipping decoy password field %r (value=%r)' % (name, val))
+                continue
             data[name] = password or ''
         elif _TICKET_RE.search(nl):
             data[name] = ticket or val
@@ -1017,6 +1140,22 @@ def _run_yaml_handler(handler, portal_url, html, ticket, username, password):
 
 
 
+def _is_relay_form(form):
+    """Return True if the form is a server-side relay (all fields hidden/submit).
+
+    Relay forms (e.g. Antlabs/MarinaWiFi post-login redirect) have no visible
+    input fields — every field is either hidden or submit.  They carry
+    credentials as pre-filled hidden fields and auto-submit via JS to redirect
+    the browser, but the actual authentication has already been completed by
+    the portal server.  Following them is unnecessary and causes failures when
+    the target endpoint is a captive-portal AP that does not yet know the client
+    (DNS hijacking returns the wrong server until MAC auth propagates).
+    """
+    visible_types = {'text', 'email', 'tel', 'number', 'search', 'password',
+                     'textarea', 'checkbox', 'radio', 'select'}
+    return not any(f['type'] in visible_types for f in form['fields'].values())
+
+
 def _should_follow_form(best, score, submitted):
     # Stop if the form scores zero or below — covers logout forms (score -3
     # via _LOGOUT_RE) and any other form with no recognisable login signal.
@@ -1029,6 +1168,21 @@ def _should_follow_form(best, score, submitted):
         dbg('[Generic] Score %d — not a login form, stopping' % score)
         return False
 
+    # After credentials have been submitted, stop if the next form is a relay
+    # (all-hidden fields).  Relay forms are browser-redirect artifacts from
+    # portal servers that have already completed authentication server-side
+    # (e.g. Antlabs/MarinaWiFi).  Submitting them from a script is not only
+    # unnecessary but actively harmful: the target AP endpoint may not yet be
+    # reachable (DNS hijacking) and returns 404 or a connection error.
+    if submitted['credentials'] and _is_relay_form(best):
+        if DEBUG:
+            log('[Generic] DEBUG: relay form after credentials — skipping in '
+                'normal operation, following for debug capture')
+            return True
+        log('[Generic] Relay form detected after credential submission — '
+            'skipping (auth already completed server-side)')
+        return False
+
     # After both credentials and a checkbox have been submitted, nothing
     # further is expected — stop unless we are in debug mode.
     if submitted['credentials'] and submitted['checkbox']:
@@ -1039,6 +1193,32 @@ def _should_follow_form(best, score, submitted):
         return False
 
     return True
+
+
+def _extract_js_settimeout_delay(html):
+    """Return the delay in milliseconds from a JS setTimeout form-submit call,
+    or None if no such pattern is found.
+
+    Matches patterns like:
+      window.setTimeout('document.myform.submit();', 5 * 1000)
+      setTimeout(function(){ document.forms[0].submit(); }, 3000)
+    Used to honour the server-intended delay before auto-submitting relay
+    forms (e.g. MarinaWiFi/Antlabs), giving the AP time to register the MAC.
+    """
+    if not html:
+        return None
+    # Pattern: setTimeout(..., <expr>) where expr is a number or simple product
+    m = re.search(r'setTimeout\s*\([^,]+,\s*(\d+(?:\s*\*\s*\d+)?)\s*\)', html)
+    if not m:
+        return None
+    expr = m.group(1).replace(' ', '')
+    try:
+        if '*' in expr:
+            a, b = expr.split('*', 1)
+            return int(a) * int(b)
+        return int(expr)
+    except ValueError:
+        return None
 
 
 def handle_generic(portal_url, html, ticket=None, username=None, password=None,
@@ -1111,6 +1291,17 @@ def handle_generic(portal_url, html, ticket=None, username=None, password=None,
     # Check for a further form step within recursion budget
     if body2 and _depth < 3:
         forms2, best2, best2_score = parse_forms(body2)
+        # Honour any JS setTimeout delay declared in the response — some
+        # portals (e.g. MarinaWiFi/Antlabs) use it to give the portal server
+        # time to register the MAC with the AP before the browser submits the
+        # next form.  Apply the delay regardless of whether we follow the form,
+        # since the MAC registration happens server-side and we need to wait
+        # even if we skip the relay POST.
+        _js_delay = _extract_js_settimeout_delay(body2)
+        if _js_delay:
+            log('[Generic] JS setTimeout detected (%d ms) — waiting %.1fs'
+                % (_js_delay, _js_delay / 1000.0))
+            time.sleep(_js_delay / 1000.0)
         if best2 and _should_follow_form(best2, best2_score, _submitted):
             log('[Generic] Another form detected — following (depth %d)' % (_depth + 1))
             return handle_generic(final2, body2, ticket=ticket,
@@ -1166,6 +1357,17 @@ def current_ssid():
         return None
 
 def load_credentials(ssid):
+    """
+    Read credentials for the given SSID from CREDS_FILE.
+
+    File format mirrors the CLI parameter convention:
+      <pattern>                     # free / checkbox portal
+      <pattern>  <ticket>           # ticket / voucher portal
+      <pattern>  <username>  <password>   # username+password portal
+
+    Lines starting with # are comments.  fnmatch wildcards are supported
+    in the SSID pattern (e.g. "free-key *", "Telekom_FON_*").
+    """
     if ssid is None:
         return None, None, None
     try:
@@ -1176,20 +1378,17 @@ def load_credentials(ssid):
                 if not line or line.startswith('#'):
                     continue
                 parts = line.split()
-                if len(parts) < 1:
+                if not fnmatch(ssid, parts[0]):
                     continue
-                pattern = parts[0]
-                if not fnmatch(ssid, pattern):
-                    continue
-                creds = parts[1:]
-                if len(creds) == 0:
+                if len(parts) == 1:
                     log('[creds] Matched SSID %r -> free' % ssid)
                     return None, None, None
-                if len(creds) == 1:
+                if len(parts) == 2:
                     log('[creds] Matched SSID %r -> ticket' % ssid)
-                    return creds[0], None, None
-                log('[creds] Matched SSID %r -> userpass for %r' % (ssid, creds[0]))
-                return None, creds[0], creds[1]
+                    return parts[1], None, None
+                if len(parts) >= 3:
+                    log('[creds] Matched SSID %r -> userpass for %r' % (ssid, parts[1]))
+                    return None, parts[1], parts[2]
     except FileNotFoundError:
         pass
     except Exception as e:
