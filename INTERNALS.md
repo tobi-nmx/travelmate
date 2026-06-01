@@ -43,7 +43,7 @@ over the WiFi uplink even when LTE/mwan is also active.
 Two probes are tried in order:
 
 1. `generate_204` — expects HTTP 204 with strictly empty body
-2. `detectportal.firefox.com/success.txt` — expects the string `success`
+2. `detectportal.firefox.com/success.txt` — expects the exact string `success`
 
 Any redirect, unexpected status code, or non-empty body on `generate_204` is
 treated as a portal intercept. The full login flow is only started if the fast
@@ -84,6 +84,26 @@ is called as the final fallback.
 
 ---
 
+## Portal detection
+
+`detect_portal()` probes `generate_204` without following redirects. When the
+AP intercepts the request and returns an HTTP redirect, the Location header
+points to the portal login page.
+
+After fetching the portal page, `_extract_redirect_url()` is called on the
+resulting HTML. Some portals (e.g. Antlabs/MarinaWiFi) respond to the initial
+GET with a browser-detection page containing a JS `location.href` assignment or
+a `<meta http-equiv="refresh">` redirect rather than serving the login form
+directly. The function follows this second redirect automatically.
+
+`_extract_redirect_url()` prefers `location.href` over `<meta refresh>` because
+if the original portal URL already contained `&amp;`-encoded query parameters,
+the meta URL may be double-encoded (`&amp;` → `&amp;amp;`) while the JS string
+remains correct. Both sources are HTML-unescaped and JS backslash-unescaped
+(`\/` → `/`) before use.
+
+---
+
 ## Generic handler
 
 `handle_generic()` is the built-in fallback for portals not covered by any
@@ -100,6 +120,69 @@ handler in `magic.d/`. It:
 The generic handler is sufficient for most simple portals. A YAML handler is
 only needed when the generic handler mis-detects success/failure, or when steps
 must be conditionally skipped.
+
+### Relay form detection
+
+After credential submission, some portals return an all-hidden form that
+auto-submits via `setTimeout` JS to a backend AP endpoint. This is a
+browser-redirect artifact — the actual MAC authorization has already been
+completed server-side by the cloud portal. `_is_relay_form()` detects this
+pattern (no visible input fields) and `_should_follow_form()` skips it after
+credentials have been submitted.
+
+In `--debug` mode `_should_follow_form()` always returns `True` (with a log
+warning) so that the complete portal flow is captured for YAML development —
+even steps that would be skipped in normal operation.
+
+### JS setTimeout delay
+
+`_extract_js_settimeout_delay()` scans the response HTML for
+`setTimeout(..., delay)` patterns (including `5 * 1000` expressions). When
+found, `handle_generic()` waits the declared delay before processing the next
+form step. This gives the portal server time to register the MAC with the AP
+before any follow-up request is sent.
+
+The wait applies regardless of whether the next form is followed or skipped —
+the MAC registration happens server-side and the delay must be honoured even
+when the relay POST is omitted.
+
+### Failure detection
+
+`looks_like_failure()` strips `<script>` and `<style>` blocks from the HTML
+before searching for failure keywords. This prevents false positives from
+anti-framing JavaScript (e.g. `document.body.innerHTML = "Access Denied"`) and
+CSS class names (e.g. `.nwaError`) that contain failure-like strings but are
+never rendered as visible text.
+
+`FAILURE_WORDS` are checked after every form submission and trigger an
+immediate abort if a clear failure message is detected (wrong password, session
+expired, access denied). These are available in English, German, French, Italian,
+Spanish, and Dutch. They are deliberately conservative — only phrases that
+unambiguously signal failure, never single words that could appear in other
+contexts.
+
+---
+
+## HTTP helpers
+
+### SSL handling
+
+`_make_opener()` accepts an `ssl_verify` parameter. When `False`, certificate
+verification is disabled for the opener (useful for AP backends with self-signed
+certificates, e.g. Antlabs). This is never applied to probe URLs.
+
+`http_post()` automatically retries with `ssl_verify=False` when an `SSLError`
+is raised. The retry uses a fresh `urllib.request.Request` object — the original
+is not replayable after a failed `open()` call since its body stream is
+exhausted, which would result in an empty POST body and a 404 response.
+
+### Cookie handling
+
+`_make_jar()` returns a `CookieJar` with `_PermissiveCookiePolicy`, which
+overrides the standard RFC 2965 domain-matching rules to forward all cookies to
+any host in the session. This is required for portal flows where a session cookie
+set by the cloud portal server (e.g. `cp.marinawifi.it`) must be forwarded to
+the AP backend on a different domain (e.g. `captiveportal-login.marinadivenezia.it`).
 
 ---
 
@@ -230,9 +313,10 @@ Core helpers are injected via the `_ctx` dict at load time:
 | `dbg(msg)` | Debug-only log output (suppressed unless `--debug`) |
 | `http_get(url, opener, _dbg_label)` | Perform a GET request; returns `(body, final_url, resp)` |
 | `http_post(url, data, opener, ...)` | Perform a POST request; returns `(body, final_url, resp)` |
-| `_make_opener(jar, follow_redirects)` | Create a cookie-aware HTTP opener, interface-bound if applicable |
+| `_make_opener(jar, follow_redirects, ssl_verify)` | Create a cookie-aware HTTP opener, interface-bound if applicable |
 | `_connectivity_ok(opener, status_url)` | Verify internet access via probe URLs; returns `True` if online |
 | `origin_of(url)` | Extract `scheme://host` from a URL |
+| `HEADERS` | Default request headers dict (User-Agent, Accept, etc.) |
 | `json` | `json` standard library module |
 | `time` | `time` standard library module |
 | `urllib_parse` | `urllib.parse` module |
@@ -245,29 +329,39 @@ See `magic.d/bahn.py` for a real-world example covering two portal backends
 
 ## Known portal quirks
 
-**Success detection — form score and submitted state** — the generic
-handler does not detect success from response keywords. Instead it asks: *should
-we follow the next form, or are we done?* This decision is made by
-`_should_follow_form()` using two inputs:
+**Browser-check redirects** — some portals (Antlabs, Marriott) respond to the
+initial GET with a JS/meta-refresh page that redirects to the same URL with an
+extra parameter (e.g. `&_browser=1`). `detect_portal()` follows this
+automatically via `_extract_redirect_url()`. If you see `step_01` containing
+only a redirect with no form, this pattern is active.
 
-1. **Form score** from `best_form()` — login-relevant fields (password, user,
-   ticket, checkbox, non-logout submit button) score positively; logout forms
-   score -3 via `_LOGOUT_RE` and are never followed; any form scoring ≤ 0 is
-   ignored.
-2. **Submitted state** — tracks whether credentials and/or a checkbox have
-   already been submitted in previous steps. Once both have been submitted,
-   no further form is expected and `_connectivity_ok()` is called directly.
+**Anti-autofill decoy fields** — portals may inject multiple hidden
+`type=password` fields with pre-filled values (e.g. `no-ff-pwmgr-1`) to defeat
+browser password managers. `fill_form()` skips these automatically when at least
+one empty `type=password` field exists in the same form.
 
-In `--debug` mode `_should_follow_form()` always returns `True` (with a log
-warning) so that the complete portal flow is captured for YAML development —
-even steps that would be skipped in normal operation.
+**Relay forms** — after a successful cloud-portal login, the server may return
+an all-hidden form that auto-submits to the AP backend. The AP backend is only
+reachable after the MAC has been registered (which the cloud portal does
+server-side). `_is_relay_form()` detects this pattern; the generic handler
+skips it and goes straight to connectivity check. In `--debug` mode the relay
+form is followed anyway so the full flow is visible in the debug files.
 
-`FAILURE_WORDS` are still checked after every form submission and trigger an
-immediate abort if a clear failure message is detected (wrong password, session
-expired, access denied). These are available in English, German, French, Italian,
-Spanish, and Dutch. They are deliberately conservative — only phrases that
-unambiguously signal failure, never single words that could appear in other
-contexts.
+**Cross-domain session cookies** — Antlabs and similar systems use a cloud
+portal on one domain and an AP backend on another. The session cookie from the
+cloud portal must be forwarded to the AP backend. `_PermissiveCookiePolicy`
+handles this by disabling RFC 2965 domain matching for the cookie jar.
+
+**Self-signed certificates** — AP backends often use self-signed TLS
+certificates. `http_post()` retries automatically with `ssl_verify=False` on
+`SSLError`. The retry builds a fresh `Request` object to avoid the exhausted
+body stream issue (which would produce an empty POST and a 404 response).
+
+**`generate_204` as connectivity gate** — `_connectivity_ok()` treats
+`generate_204` as the primary probe. If it is redirected by the portal, all
+other probes are skipped even if they succeed. Some portals do not intercept
+probes like `detectportal.firefox.com`, which would otherwise produce a
+false-positive "online" result while the portal is still active.
 
 **`link-orig` / `dst` / `redirect` fields** — many portal frameworks include a
 redirect-back field in the login form. Some portals break if this value is
@@ -301,3 +395,35 @@ overhead to ~1s in the normal "already online" case.
 interface in `/tmp/trm_runtime.json` varies across Travelmate versions. The
 script tries `sta_iface`, `travelmate_iface`, and `iface` in order, then falls
 back to scanning `ip route` for a `sta*` or `wwan*` interface.
+
+---
+
+## Debugging unknown portals
+
+The standard approach is `--debug --no-bind` plus the AI prompt in
+CONTRIBUTING.md. For portals where the debug log alone is insufficient (e.g.
+complex multi-domain flows, timing-sensitive MAC registration), capture the
+browser login with `tcpdump` on the router uplink interface:
+
+```sh
+# On the router, before the manual browser login:
+tcpdump -i phy1-sta0 -w /tmp/login.pcap host <portal-cloud-ip>
+
+# Log in manually from another device, then Ctrl+C
+```
+
+Analyse the capture with tshark to reveal the connection sequence and timing
+without decrypting HTTPS:
+
+```sh
+# Show TLS SNI hostnames and connection times:
+tshark -r login.pcap -Y "tls.handshake.extensions_server_name" \
+  -T fields -e frame.time_relative -e ip.dst \
+  -e tls.handshake.extensions_server_name
+
+# Show all IP endpoints (to identify unknown backend IPs):
+tshark -r login.pcap -q -z "endpoints,ip"
+```
+
+This reveals which servers are contacted, in which order, and with what timing
+— enough to understand the flow even when all traffic is encrypted.
