@@ -931,8 +931,10 @@ def _wlan_nameservers():
 
     On OpenWrt, reads /tmp/resolv.conf.d/resolv.conf.auto which netifd writes
     per interface, and returns only nameservers from the wwan/sta section.
-    On Termux and other systems without resolv.conf.auto, falls back to
-    /etc/resolv.conf and returns all listed nameservers.
+    On systems without resolv.conf.auto, falls back to /etc/resolv.conf.
+    On Termux (no /etc either), both reads fail silently and an empty list
+    is returned — _resolve_url_host() then falls back to the original URL,
+    which is correct since Termux has no mwan3 routing issues.
 
     Only the WLAN-assigned DNS servers know internal captive-portal hostnames
     (e.g. captiveportal-login.marinadivenezia.it); public resolvers and
