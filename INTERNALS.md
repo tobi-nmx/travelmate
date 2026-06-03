@@ -65,6 +65,10 @@ available, `ip route` is scanned for a `sta*` or `wwan*` interface as fallback.
 Use `--no-bind` to skip interface binding when running outside OpenWrt
 (e.g. on a laptop or Android/Termux for portal debugging).
 
+**Interface binding also applies to DNS queries** — `_resolve_host_via_wlan_dns()`
+binds its UDP socket to the uplink interface via `SO_BINDTODEVICE` so that
+DNS queries to portal-internal nameservers reach them over the correct interface.
+
 ---
 
 ## Dispatcher and handler loading
@@ -161,6 +165,13 @@ Spanish, and Dutch. They are deliberately conservative — only phrases that
 unambiguously signal failure, never single words that could appear in other
 contexts.
 
+### Connectivity retry
+
+After the final form submission, `handle_generic()` retries `_connectivity_ok()`
+up to five times with increasing delays (0, 2, 4, 6, 8 seconds). This covers
+portals where the AP registers the MAC asynchronously and the firewall rule takes
+a few seconds to propagate after the credential POST.
+
 ---
 
 ## HTTP helpers
@@ -183,6 +194,50 @@ overrides the standard RFC 2965 domain-matching rules to forward all cookies to
 any host in the session. This is required for portal flows where a session cookie
 set by the cloud portal server (e.g. `cp.marinawifi.it`) must be forwarded to
 the AP backend on a different domain (e.g. `captiveportal-login.marinadivenezia.it`).
+
+---
+
+## WLAN-internal DNS resolution
+
+Some captive portals use hostnames for their AP backends that are only
+resolvable via the portal's own DHCP-assigned DNS servers (e.g.
+`captiveportal-login.marinadivenezia.it` → `10.60.0.101`). The system resolver
+on OpenWrt may use a different DNS server (WireGuard, public DNS) that returns
+NXDOMAIN for these names.
+
+Three functions handle this:
+
+**`_wlan_nameservers()`** reads `/tmp/resolv.conf.d/resolv.conf.auto` (written
+by netifd per interface) and returns only nameservers from the `wwan` or `sta`
+interface section. On Termux and other systems without `resolv.conf.auto`, it
+falls back to `/etc/resolv.conf` and returns all listed nameservers.
+
+**`_resolve_host_via_wlan_dns(hostname)`** sends a raw UDP DNS A-query directly
+to each WLAN nameserver, bypassing the system resolver entirely. The UDP socket
+is bound to the uplink interface via `SO_BINDTODEVICE` so the query reaches the
+portal's DNS server over the correct interface. Returns the first IPv4 answer,
+or `None` if all servers fail.
+
+**`_resolve_url_host(url)`** rewrites the hostname in a URL with the IP
+returned by `_resolve_host_via_wlan_dns()`. Falls back to the original URL if
+resolution fails. Called by `handle_generic()` before every follow-up form POST,
+and available to Python plugins via `_ctx['_resolve_url_host']`.
+
+---
+
+## Connectivity check
+
+`_connectivity_ok()` treats `generate_204` as the primary probe and gate:
+
+- If `generate_204` is **redirected**, all subsequent probes are skipped. Some
+  portals do not intercept secondary probes (e.g. `detectportal.firefox.com`),
+  which would otherwise produce a false-positive "online" result.
+- If `generate_204` has a **network error** (no uplink, interface down), it is
+  also treated as a gate failure. This prevents false positives when a secondary
+  interface (LTE/WAN) is reachable but the WLAN uplink is not.
+- Only if `generate_204` returns HTTP 204 with an empty body is the result
+  considered authoritative. Secondary probes are checked as fallback only when
+  `generate_204` is not intercepted and does not return a clean 204.
 
 ---
 
@@ -243,7 +298,6 @@ steps:
   - label:    token_auth
     action:   from_form
     fields:   from_form
-    # only runs if the server returned a form containing a session token
     only_if:  SESSION_TOKEN
 
   - label:       accept_tos
@@ -255,7 +309,6 @@ steps:
   - label:          router_login
     action:         from_form
     fields:         from_form
-    # only runs when the form action points back to the access point
     only_if_action: hotspot
 ```
 
@@ -263,19 +316,14 @@ steps:
 
 **`only_if`** — use when a step should only run if the previous response
 contained a specific token or field name (e.g. `FREEKEYWIFI`, `SESSION_TOKEN`).
-Without this guard, the handler would attempt the step on every portal that
-matches the `match` patterns, not just the one that returns that token.
 
 **`only_if_action`** — use when the final login POST goes to a different host
-than the portal pages (e.g. directly to the hotspot router). This prevents the
-step from firing prematurely on an intermediate page.
+than the portal pages (e.g. directly to the hotspot router).
 
 **`clear_fields`** — use for fields like `link-orig`, `dst`, or `redirect` that
-are present in the form HTML but must be sent empty. Browsers send them empty;
-some portals break if the original value is echoed back.
+are present in the form HTML but must be sent empty.
 
-**`check_boxes`** — use for T&C / AGB acceptance steps. The generic handler
-ticks checkboxes too, but does not do so reliably across multi-step flows.
+**`check_boxes`** — use for T&C / AGB acceptance steps.
 
 ---
 
@@ -317,6 +365,9 @@ Core helpers are injected via the `_ctx` dict at load time:
 | `_connectivity_ok(opener, status_url)` | Verify internet access via probe URLs; returns `True` if online |
 | `origin_of(url)` | Extract `scheme://host` from a URL |
 | `HEADERS` | Default request headers dict (User-Agent, Accept, etc.) |
+| `_wlan_nameservers()` | WLAN-assigned DNS servers from resolv.conf.auto |
+| `_resolve_host_via_wlan_dns(hostname)` | Resolve hostname via WLAN DNS, bypassing system resolver |
+| `_resolve_url_host(url)` | Rewrite URL hostname with WLAN-DNS-resolved IP |
 | `json` | `json` standard library module |
 | `time` | `time` standard library module |
 | `urllib_parse` | `urllib.parse` module |
@@ -357,11 +408,25 @@ certificates. `http_post()` retries automatically with `ssl_verify=False` on
 `SSLError`. The retry builds a fresh `Request` object to avoid the exhausted
 body stream issue (which would produce an empty POST and a 404 response).
 
+**Portal-internal hostnames** — some portal AP backends use hostnames only
+resolvable via the portal's own DHCP-assigned DNS (e.g. Antlabs backends on
+`*.marinadivenezia.it`). The system resolver on OpenWrt may use WireGuard or
+public DNS that returns NXDOMAIN. `_resolve_url_host()` bypasses the system
+resolver by querying the WLAN nameservers directly via raw UDP. This is applied
+automatically by `handle_generic()` before follow-up POSTs, and is available
+to plugins via `_ctx`.
+
+**Multi-WAN / mwan3 routing** — on routers with multiple WAN interfaces, DNS
+queries and HTTP requests must be explicitly bound to the WLAN uplink interface.
+All HTTP openers use `SO_BINDTODEVICE` via `_BoundHTTPHandler`, and DNS queries
+in `_resolve_host_via_wlan_dns()` bind their UDP socket the same way. Without
+this, requests may leave via LTE/WAN and never reach portal-internal servers.
+
 **`generate_204` as connectivity gate** — `_connectivity_ok()` treats
-`generate_204` as the primary probe. If it is redirected by the portal, all
-other probes are skipped even if they succeed. Some portals do not intercept
-probes like `detectportal.firefox.com`, which would otherwise produce a
-false-positive "online" result while the portal is still active.
+`generate_204` as the primary probe. If it is redirected or unreachable (network
+error), all other probes are skipped. This prevents false positives from
+unintercepted secondary probes (e.g. `detectportal.firefox.com`) or from
+secondary WAN interfaces that are reachable even when the WLAN uplink is down.
 
 **`link-orig` / `dst` / `redirect` fields** — many portal frameworks include a
 redirect-back field in the login form. Some portals break if this value is
@@ -375,21 +440,9 @@ that page if all probe URLs are still redirected.
 
 **Session expiry** — some portals (e.g. free-key.eu) expire sessions after a
 few hours. Travelmate may not detect this because its connectivity check accepts
-any HTTP 200 or 204 response as "online" — it does not verify that the response
-body is empty or that no redirect occurred at the HTTP level. A hotspot that
-returns a well-formed 204 after session expiry (instead of redirecting to the
-login page again) will therefore fool Travelmate indefinitely.
-
-Switching `trm_captiveurl` to HTTPS would in theory prevent this (a hotspot
-cannot fake a TLS-verified 204 from Google), but it would also break initial
-portal detection — the hotspot can only intercept and redirect plain HTTP
-requests, so HTTPS would never trigger the captive portal flow.
-
-The recommended workaround is a cron job that runs `magic.login` every 5
-minutes. When the session has expired and the portal redirects again,
-`magic.login` will detect the login page and re-authenticate. The fast
-pre-check (`generate_204` with strict empty-body requirement) keeps the
-overhead to ~1s in the normal "already online" case.
+any HTTP 200 or 204 response as "online". The recommended workaround is a cron
+job that runs `magic.login` every 5 minutes — when the session expires and the
+portal redirects again, `magic.login` re-authenticates automatically.
 
 **`_detect_uplink_iface()` compatibility** — the field name for the uplink
 interface in `/tmp/trm_runtime.json` varies across Travelmate versions. The
@@ -425,5 +478,18 @@ tshark -r login.pcap -Y "tls.handshake.extensions_server_name" \
 tshark -r login.pcap -q -z "endpoints,ip"
 ```
 
-This reveals which servers are contacted, in which order, and with what timing
-— enough to understand the flow even when all traffic is encrypted.
+If TLS MITM decryption is available (e.g. via PCAPdroid on Android with an
+SSL keylog file), the full HTTP request/response bodies can be inspected:
+
+```sh
+tshark -r login.pcap \
+  -o "tls.keylog_file:/path/to/sslkeylogfile.txt" \
+  -Y "http.request or http.response" \
+  -T fields -e frame.time_relative -e ip.dst \
+  -e http.request.method -e http.request.uri \
+  -e http.response.code -e http.file_data
+```
+
+This is particularly useful when the browser login succeeds but `magic.login`
+fails — comparing the exact POST bodies confirms whether the script is sending
+the correct fields.

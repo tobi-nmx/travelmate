@@ -716,7 +716,8 @@ def _connectivity_ok(opener=None, status_url=None):
     log('[connectivity] Verifying actual internet access ...')
     if opener is None:
         opener, _ = _make_opener()
-    generate_204_redirected = False
+    generate_204_ok = False   # True only when generate_204 gives a clean 204
+    generate_204_failed = False  # True when generate_204 redirected or errored
     for probe in PROBE_URLS:
         expected = ONLINE_SIGNATURES.get(probe)
         body, final_url, resp = http_get(probe, opener=opener)
@@ -725,16 +726,26 @@ def _connectivity_ok(opener=None, status_url=None):
         if final_url != probe:
             log('[connectivity]   ✗ Redirected — portal still active')
             if expected is None:   # generate_204 was redirected
-                generate_204_redirected = True
+                generate_204_failed = True
             continue
-        if generate_204_redirected:
-            # generate_204 was intercepted by the portal — do not trust any
-            # other probe result, since the portal may not intercept it.
-            log('[connectivity]   ✗ Skipping (generate_204 was redirected)')
+        if body is None:
+            # Network error (e.g. no uplink, interface down).  For generate_204
+            # this means we definitely cannot verify online status; mark as
+            # failed so secondary probes are not trusted.
+            if expected is None:
+                log('[connectivity]   ✗ Network error on generate_204 — no uplink?')
+                generate_204_failed = True
+            continue
+        if generate_204_failed:
+            # generate_204 was intercepted or unreachable — do not trust any
+            # other probe result, since the portal may not intercept it and
+            # a secondary probe may be reachable via a non-WLAN interface.
+            log('[connectivity]   ✗ Skipping (generate_204 failed)')
             continue
         if expected is None:
             if body == '':
                 log('[connectivity] ✓ Online (204 No Content)')
+                generate_204_ok = True
                 return True
             log('[connectivity]   ✗ Expected empty 204 body')
         else:
@@ -915,6 +926,157 @@ def resolve_action(base_url, action):
 
 # ── YAML-driven handler engine ────────────────────────────────────────────────
 
+def _wlan_nameservers():
+    """Return DNS nameservers assigned via WLAN DHCP (wwan/sta interface).
+
+    On OpenWrt, reads /tmp/resolv.conf.d/resolv.conf.auto which netifd writes
+    per interface, and returns only nameservers from the wwan/sta section.
+    On Termux and other systems without resolv.conf.auto, falls back to
+    /etc/resolv.conf and returns all listed nameservers.
+
+    Only the WLAN-assigned DNS servers know internal captive-portal hostnames
+    (e.g. captiveportal-login.marinadivenezia.it); public resolvers and
+    WireGuard/WAN DNS servers do not.
+    """
+    result = []
+
+    # OpenWrt: per-interface resolv.conf written by netifd
+    try:
+        with open('/tmp/resolv.conf.d/resolv.conf.auto') as _f:
+            _in_wwan = False
+            for _line in _f:
+                _line = _line.strip()
+                _m = re.match(r'#\s+Interface\s+(\S+)', _line)
+                if _m:
+                    _iface = _m.group(1).lower()
+                    _in_wwan = (_iface in ('wwan', 'wlan0', 'wlan1') or
+                                'sta' in _iface)
+                    continue
+                if not _in_wwan:
+                    continue
+                _m = re.match(r'nameserver\s+(\S+)', _line)
+                if _m:
+                    result.append(_m.group(1))
+                    dbg('[DNS] WLAN nameserver (resolv.conf.auto): %s' % _m.group(1))
+        if result:
+            return result
+    except Exception:
+        pass
+
+    # Termux / generic fallback: use /etc/resolv.conf
+    try:
+        with open('/etc/resolv.conf') as _f:
+            for _line in _f:
+                _m = re.match(r'nameserver\s+(\S+)', _line.strip())
+                if _m:
+                    result.append(_m.group(1))
+                    dbg('[DNS] Nameserver (resolv.conf): %s' % _m.group(1))
+    except Exception as _e:
+        dbg('[DNS] Could not read resolv.conf: %s' % _e)
+    return result
+
+
+def _resolve_host_via_wlan_dns(hostname):
+    """Resolve a hostname using the WLAN-assigned DNS servers.
+
+    Some captive portals use internal hostnames (e.g. for AP backends) that
+    are only resolvable via the portal's own DHCP-assigned DNS servers.
+    The system resolver may use a different server (WireGuard, public DNS)
+    that returns NXDOMAIN for these names.
+
+    Sends a raw UDP DNS A-query directly to each WLAN nameserver in turn,
+    bypassing the system resolver entirely.  Falls back to None if all fail.
+    """
+    import socket as _socket
+    import struct as _struct
+
+    def _raw_a_query(hostname, nameserver):
+        txid   = 0x4d4c   # "ML" — magic.login
+        flags  = 0x0100   # standard query, recursion desired
+        header = _struct.pack('>HHHHHH', txid, flags, 1, 0, 0, 0)
+        qname  = b''.join(
+            _struct.pack('B', len(p)) + p.encode()
+            for p in hostname.split('.')
+        ) + b'\x00'
+        packet = header + qname + _struct.pack('>HH', 1, 1)
+        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        sock.settimeout(3)
+        # Bind to the uplink interface so the query goes over the WLAN
+        # uplink even when LTE/mwan provides a default route.  Without
+        # this the query may leave via a different interface and be
+        # answered by the wrong DNS server (or time out entirely).
+        if _UPLINK_IFACE and not _NO_BIND:
+            try:
+                sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_BINDTODEVICE,
+                                _UPLINK_IFACE.encode() + b'\x00')
+            except Exception:
+                pass   # non-fatal: falls back to default routing
+        try:
+            sock.sendto(packet, (nameserver, 53))
+            data, _ = sock.recvfrom(512)
+        finally:
+            sock.close()
+        ancount = _struct.unpack('>H', data[6:8])[0]
+        if ancount == 0:
+            return None
+        # Skip header + question section
+        offset = 12
+        while data[offset] != 0:
+            if data[offset] & 0xC0 == 0xC0:
+                offset += 2
+                break
+            offset += data[offset] + 1
+        else:
+            offset += 1
+        offset += 4   # QTYPE + QCLASS
+        # Walk answer records looking for an A record
+        for _ in range(ancount):
+            if data[offset] & 0xC0 == 0xC0:
+                offset += 2
+            else:
+                while data[offset] != 0:
+                    offset += data[offset] + 1
+                offset += 1
+            rtype, _, _, rdlen = _struct.unpack('>HHIH', data[offset:offset+10])
+            offset += 10
+            if rtype == 1 and rdlen == 4:   # A record
+                return '.'.join(str(b) for b in data[offset:offset+4])
+            offset += rdlen
+        return None
+
+    for ns in _wlan_nameservers():
+        try:
+            ip = _raw_a_query(hostname, ns)
+            if ip:
+                dbg('[DNS] %s -> %s (via WLAN DNS %s)' % (hostname, ip, ns))
+                return ip
+        except Exception as _e:
+            dbg('[DNS] Query to %s failed: %s' % (ns, _e))
+    return None
+
+
+def _resolve_url_host(url):
+    """Rewrite url replacing its hostname with the IP from WLAN DNS if needed.
+
+    Used before POSTing to a portal backend whose hostname is only resolvable
+    via the portal's own internal DNS (e.g. captive-portal AP backends).
+    If resolution fails or returns the same address, the original URL is
+    returned unchanged.
+    """
+    parsed = urllib.parse.urlparse(url)
+    hostname = parsed.hostname
+    if not hostname:
+        return url
+    ip = _resolve_host_via_wlan_dns(hostname)
+    if not ip:
+        return url
+    new_netloc = parsed.netloc.replace(hostname, ip)
+    resolved = parsed._replace(netloc=new_netloc).geturl()
+    if resolved != url:
+        log('[DNS] Resolved %s -> %s' % (hostname, ip))
+    return resolved
+
+
 # Context dict injected into Python plugins so they can call core helpers
 # without importing magic.login (which would cause circular imports).
 def _make_plugin_ctx():
@@ -931,6 +1093,9 @@ def _make_plugin_ctx():
         'urllib_parse': urllib.parse,
         'urllib_error': urllib.error,
         'HEADERS':      HEADERS,
+        '_wlan_nameservers':         _wlan_nameservers,
+        '_resolve_host_via_wlan_dns': _resolve_host_via_wlan_dns,
+        '_resolve_url_host':         _resolve_url_host,
     }
 
 
@@ -1304,16 +1469,26 @@ def handle_generic(portal_url, html, ticket=None, username=None, password=None,
             time.sleep(_js_delay / 1000.0)
         if best2 and _should_follow_form(best2, best2_score, _submitted):
             log('[Generic] Another form detected — following (depth %d)' % (_depth + 1))
+            # Resolve the follow-up form action via WLAN DNS in case the
+            # portal backend hostname is only known to the portal's own DNS.
+            final2 = _resolve_url_host(final2)
             return handle_generic(final2, body2, ticket=ticket,
                                   username=username, password=password,
                                   opener=opener, jar=jar,
                                   _depth=_depth + 1, _status_url=_status_url,
                                   _submitted=_submitted)
 
-    # No more login forms — verify actual connectivity
-    if _connectivity_ok(opener, status_url=_status_url):
-        log('[Generic] Connectivity confirmed after form submission')
-        return True
+    # No more login forms — verify actual connectivity.
+    # Some portals (e.g. Antlabs/MarinaWiFi) register the MAC asynchronously
+    # after the credential POST; the AP firewall rule may take several seconds
+    # to propagate.  Retry a few times before giving up.
+    for _delay in [0, 2, 4, 6, 8]:
+        if _delay:
+            log('[Generic] Not online yet — retrying in %ds' % _delay)
+            time.sleep(_delay)
+        if _connectivity_ok(opener, status_url=_status_url):
+            log('[Generic] Connectivity confirmed after form submission')
+            return True
 
     log('[Generic] Login outcome unclear')
     return False
