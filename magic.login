@@ -1526,12 +1526,90 @@ def dispatch(portal_url, html, ticket=None, username=None, password=None):
 # ── SSID / credentials helpers ────────────────────────────────────────────────
 
 def current_ssid():
+    # Try Travelmate runtime JSON first
     try:
         with open(TRM_RUNTIME) as f:
             data = json.load(f)
-        return data.get('station_id') or data.get('travelmate_ssid') or data.get('ssid')
+        ssid = data.get('station_id') or data.get('travelmate_ssid') or data.get('ssid')
+        if ssid:
+            return ssid
     except Exception:
-        return None
+        pass
+
+    # Fallback: read active SSID from iw dev (works without trm_runtime.json).
+    # Parse per-interface blocks and prefer the uplink interface (sta* or wwan*)
+    # over the local AP interfaces to avoid returning the router's own SSID.
+    try:
+        import subprocess as _sp
+        out = _sp.check_output(['iw', 'dev'], stderr=_sp.DEVNULL).decode()
+        current_iface = None
+        sta_ssid = None
+        first_ssid = None
+        for line in out.splitlines():
+            stripped = line.strip()
+            # Interface header: "Interface phy1-sta0"
+            if stripped.startswith('Interface '):
+                current_iface = stripped.split(None, 1)[1]
+            elif stripped.startswith('ssid '):
+                ssid = stripped[5:].strip()
+                if not ssid:
+                    continue
+                if first_ssid is None:
+                    first_ssid = ssid
+                # Prefer sta* or wwan* interfaces — these are the uplink
+                if current_iface and ('sta' in current_iface or 'wwan' in current_iface):
+                    dbg('[ssid] Detected via iw dev (%s): %r' % (current_iface, ssid))
+                    sta_ssid = ssid
+        if sta_ssid:
+            return sta_ssid
+        if first_ssid:
+            dbg('[ssid] Detected via iw dev (first): %r' % first_ssid)
+            return first_ssid
+    except Exception:
+        pass
+
+    return None
+
+def load_credentials_from_uci(ssid):
+    """Read script_args for the given SSID from Travelmate's UCI configuration.
+
+    Iterates over travelmate.@uplink[*] entries and returns the script_args
+    of the first entry whose ssid matches.  The args follow the same convention
+    as CLI parameters: one value = ticket, two values = username + password.
+
+    Falls back to (None, None, None) if UCI is unavailable or no match found.
+    """
+    if not ssid:
+        return None, None, None
+    try:
+        import subprocess as _sp
+        out = _sp.check_output(['uci', 'show', 'travelmate'],
+                               stderr=_sp.DEVNULL).decode()
+        # Build a map of uplink index → {ssid, script_args}
+        uplinks = {}
+        for line in out.splitlines():
+            # travelmate.@uplink[N].key='value'
+            import re as _re
+            m = _re.match(r"travelmate\.@uplink\[(\d+)\]\.(\w+)='(.*)'", line)
+            if not m:
+                continue
+            idx, key, val = m.group(1), m.group(2), m.group(3)
+            uplinks.setdefault(idx, {})[key] = val
+        for idx, uplink in sorted(uplinks.items()):
+            if uplink.get('ssid') == ssid and 'script_args' in uplink:
+                args = uplink['script_args'].split()
+                if len(args) == 0:
+                    return None, None, None
+                if len(args) == 1:
+                    log('[creds] UCI script_args for %r -> ticket' % ssid)
+                    return args[0], None, None
+                if len(args) >= 2:
+                    log('[creds] UCI script_args for %r -> userpass' % ssid)
+                    return None, args[0], args[1]
+    except Exception as e:
+        dbg('[creds] UCI lookup failed: %s' % e)
+    return None, None, None
+
 
 def load_credentials(ssid):
     """
@@ -1581,7 +1659,10 @@ def main():
         ssid = current_ssid()
         if ssid:
             log('[*] Active SSID: %r' % ssid)
+            # Try credentials file first, then UCI script_args as fallback
             ticket, username, password = load_credentials(ssid)
+            if not ticket and not username:
+                ticket, username, password = load_credentials_from_uci(ssid)
 
     if ticket:
         log('[*] Mode: ticket login  (ticket=%r)' % ticket)

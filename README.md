@@ -81,8 +81,8 @@ echo "*/5 * * * * /etc/travelmate/magic.login" >> /etc/crontabs/root
 
 ## Credentials
 
-For portals that require a username/password or ticket, there are two ways to
-provide credentials.
+For portals that require a username/password or ticket, there are three ways to
+provide credentials — tried in this order:
 
 ### 1. Per-station in Travelmate (recommended)
 
@@ -109,12 +109,21 @@ place, create `/etc/captive-credentials.conf`:
 Telekom_FON_*                        your@t-online.de   yourpassword
 VodafoneWifi*                        myuser             mypassword
 CoffeeShop_WLAN                      ABCD-1234
-# No entry needed for free/checkbox portals — absence is the default.
+*
 ```
 
-The script reads the active SSID from Travelmate's runtime JSON and matches it
-against this file automatically. Per-station script arguments take priority over
-the credentials file if both are set.
+The script reads the active SSID and matches it against this file automatically.
+
+### 3. UCI script_args (cron reconnect fallback)
+
+When `magic.login` is called from cron (for session renewal) rather than
+directly by Travelmate, CLI arguments are not available. In this case the script
+reads `script_args` from the matching Travelmate UCI uplink entry automatically.
+No extra configuration is needed — if `script_args` are already set in LuCI,
+cron-based reconnects will use them.
+
+Per-station script arguments take priority over the credentials file if both
+are set. UCI lookup is used as a last resort when neither of the above applies.
 
 ---
 
