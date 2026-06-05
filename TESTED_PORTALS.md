@@ -16,7 +16,7 @@ longer works — please [open an issue](../../issues/new).
 | Deutsche Bahn WIFIonICE | WIFIonICE | `magic.d/bahn.py` | DE/EU (ICE, IC trains) | ✅ tested | Ombord MAC-based auth |
 | Deutsche Bahn stations | WIFI@DB | `magic.d/bahn.py` | DE (stations) | ✅ tested | CNA REST API |
 | BayernWLAN | @BayernWLAN | generic | DE (Bavaria) | ✅ tested | Simple captive portal with single T&C accept, no registration |
-| MarinaWIFI | MarinaWIFI | IT (camping ressort) | ...tested | Antlabs IG portals, AP backend hostnames are only resolvable via DHCP-assigned DNS |
+| MarinaWIFI | MarinaWIFI | IT (camping resort) | ...tested | Antlabs IG portals, AP backend hostnames are only resolvable via DHCP-assigned DNS |
 | M-WLAN (Munich) | M-WLAN Free WiFi | generic | DE (Munich) | ❓ untested | Simple AGB portal with browser redirect; time-limited session, no registration |
 | Telekom Hotspot | Telekom_FON_* | generic | DE | ❓ untested | Redirect-based captive portal with login form (Hotspot pass / t-online.de credentials or ticket) |
 | Vodafone Hotspot | VodafoneWifi* | generic | DE | ❓ untested | Captive portal with T&C splash, short free session, optional extension via Hotspot flat or ticket |
