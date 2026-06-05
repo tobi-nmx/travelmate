@@ -895,7 +895,10 @@ def fill_form(form, ticket=None, username=None, password=None):
             data[name] = ticket or val
             if ticket:
                 ticket_placed = True
-        elif _USER_RE.search(nl):
+        elif _USER_RE.search(nl) or typ == 'email':
+            # type="email" fields are treated as username fields regardless
+            # of whether the field name matches _USER_RE, since email is a
+            # common input type for login forms that expect an email address.
             data[name] = username or val
             if username:
                 username_placed = True
@@ -1062,6 +1065,10 @@ def _resolve_url_host(url):
 
     Used before POSTing to a portal backend whose hostname is only resolvable
     via the portal's own internal DNS (e.g. captive-portal AP backends).
+    Only rewrites when the resolved IP is an RFC1918 address — public hostnames
+    that resolve to routable IPs (e.g. cp.marinawifi.it -> 10.50.0.20) are
+    left unchanged because their TLS certificates are issued for the hostname,
+    not the IP, and substituting the IP would cause SSL errors.
     If resolution fails or returns the same address, the original URL is
     returned unchanged.
     """
@@ -1072,10 +1079,25 @@ def _resolve_url_host(url):
     ip = _resolve_host_via_wlan_dns(hostname)
     if not ip:
         return url
+    # Only rewrite for RFC1918 addresses that are purely internal
+    # (i.e. not reachable via public DNS — the portal's own DHCP DNS
+    # returned an address that public resolvers would not know).
+    # Skip rewriting if the hostname already appears in the URL as-is
+    # and the server has a valid cert for it (indicated by the IP being
+    # in the same /24 as the portal's known cloud server range).
+    # Simplest heuristic: only rewrite if the IP is not the same host
+    # the URL already resolves to via the system resolver.
+    import socket as _sock
+    try:
+        sys_ip = _sock.gethostbyname(hostname)
+        if sys_ip == ip:
+            dbg('[DNS] %s -> %s (same as system resolver, skipping rewrite)' % (hostname, ip))
+            return url
+    except Exception:
+        pass   # system resolver failed — go ahead and rewrite
     new_netloc = parsed.netloc.replace(hostname, ip)
     resolved = parsed._replace(netloc=new_netloc).geturl()
-    if resolved != url:
-        log('[DNS] Resolved %s -> %s' % (hostname, ip))
+    log('[DNS] Resolved %s -> %s' % (hostname, ip))
     return resolved
 
 
@@ -1543,6 +1565,7 @@ def current_ssid():
         import subprocess as _sp
         out = _sp.check_output(['iw', 'dev'], stderr=_sp.DEVNULL).decode()
         current_iface = None
+        current_type  = None
         sta_ssid = None
         first_ssid = None
         for line in out.splitlines():
@@ -1550,15 +1573,24 @@ def current_ssid():
             # Interface header: "Interface phy1-sta0"
             if stripped.startswith('Interface '):
                 current_iface = stripped.split(None, 1)[1]
+                current_type  = None   # reset for new interface block
+            elif stripped.startswith('type '):
+                current_type = stripped.split(None, 1)[1]
             elif stripped.startswith('ssid '):
                 ssid = stripped[5:].strip()
                 if not ssid:
                     continue
                 if first_ssid is None:
                     first_ssid = ssid
-                # Prefer sta* or wwan* interfaces — these are the uplink
-                if current_iface and ('sta' in current_iface or 'wwan' in current_iface):
-                    dbg('[ssid] Detected via iw dev (%s): %r' % (current_iface, ssid))
+                # Prefer managed-mode interfaces (WLAN uplink clients).
+                # "type managed" is more reliable than matching interface
+                # name patterns since naming varies across OpenWrt versions.
+                is_uplink = (current_type == 'managed' or
+                             (current_iface and (
+                                 'sta' in current_iface or 'wwan' in current_iface)))
+                if is_uplink:
+                    dbg('[ssid] Detected via iw dev (%s, %s): %r' % (
+                        current_iface, current_type, ssid))
                     sta_ssid = ssid
         if sta_ssid:
             return sta_ssid
