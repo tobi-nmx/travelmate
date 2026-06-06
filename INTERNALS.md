@@ -220,8 +220,11 @@ or `None` if all servers fail.
 
 **`_resolve_url_host(url)`** rewrites the hostname in a URL with the IP
 returned by `_resolve_host_via_wlan_dns()`. Falls back to the original URL if
-resolution fails. Called by `handle_generic()` before every follow-up form POST,
-and available to Python plugins via `_ctx['_resolve_url_host']`.
+resolution fails. Called by `handle_generic()` before every form POST (including
+the initial credential POST and relay POSTs), and available to Python plugins
+via `_ctx['_resolve_url_host']`. This is essential for portals where the form
+action URL points to an AP backend hostname that is DNS-hijacked to the router
+while the client MAC is not yet authorized.
 
 ---
 

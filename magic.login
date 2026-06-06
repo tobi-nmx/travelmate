@@ -1448,6 +1448,10 @@ def handle_generic(portal_url, html, ticket=None, username=None, password=None,
 
     data = fill_form(best, ticket=ticket, username=username, password=password)
     action_url = resolve_action(portal_url, best['action'])
+    # Resolve action URL via WLAN DNS — portal AP backends (e.g. Antlabs)
+    # use hostnames that are only resolvable via the portal's own DNS servers
+    # and may be DNS-hijacked to the router before MAC authorization.
+    action_url = _resolve_url_host(action_url)
 
     log('[Generic] Submitting to %s' % action_url)
     log('[Generic] POST data: %s' % {k: v for k, v in data.items() if 'pass' not in k.lower()})
@@ -1493,8 +1497,7 @@ def handle_generic(portal_url, html, ticket=None, username=None, password=None,
             time.sleep(_js_delay / 1000.0)
         if best2 and _should_follow_form(best2, best2_score, _submitted):
             log('[Generic] Another form detected — following (depth %d)' % (_depth + 1))
-            # Resolve the follow-up form action via WLAN DNS in case the
-            # portal backend hostname is only known to the portal's own DNS.
+            # Resolve the follow-up page URL via WLAN DNS.
             final2 = _resolve_url_host(final2)
             return handle_generic(final2, body2, ticket=ticket,
                                   username=username, password=password,
@@ -1564,34 +1567,44 @@ def current_ssid():
     try:
         import subprocess as _sp
         out = _sp.check_output(['iw', 'dev'], stderr=_sp.DEVNULL).decode()
-        current_iface = None
-        current_type  = None
-        sta_ssid = None
+        # Parse iw dev output: each Interface block contains ssid, type, etc.
+        # ssid appears before type in the output, so we collect all fields per
+        # interface block and classify after the block ends (on next Interface
+        # header or end of output).
+        # Collect all interface blocks, then pick the uplink SSID.
+        # ssid appears before type in iw dev output, so we parse each block
+        # completely before classifying it.
+        _iface_blocks = []   # list of (iface, ssid, type)
+        _cur_iface = None
+        _cur_ssid  = None
+        _cur_type  = None
+        for _line in out.splitlines():
+            _s = _line.strip()
+            if _s.startswith('Interface '):
+                if _cur_iface is not None:
+                    _iface_blocks.append((_cur_iface, _cur_ssid, _cur_type))
+                _cur_iface = _s.split(None, 1)[1]
+                _cur_ssid  = None
+                _cur_type  = None
+            elif _s.startswith('type '):
+                _cur_type = _s.split(None, 1)[1]
+            elif _s.startswith('ssid '):
+                _cur_ssid = _s[5:].strip() or None
+        if _cur_iface is not None:
+            _iface_blocks.append((_cur_iface, _cur_ssid, _cur_type))
+
+        sta_ssid   = None
         first_ssid = None
-        for line in out.splitlines():
-            stripped = line.strip()
-            # Interface header: "Interface phy1-sta0"
-            if stripped.startswith('Interface '):
-                current_iface = stripped.split(None, 1)[1]
-                current_type  = None   # reset for new interface block
-            elif stripped.startswith('type '):
-                current_type = stripped.split(None, 1)[1]
-            elif stripped.startswith('ssid '):
-                ssid = stripped[5:].strip()
-                if not ssid:
-                    continue
-                if first_ssid is None:
-                    first_ssid = ssid
-                # Prefer managed-mode interfaces (WLAN uplink clients).
-                # "type managed" is more reliable than matching interface
-                # name patterns since naming varies across OpenWrt versions.
-                is_uplink = (current_type == 'managed' or
-                             (current_iface and (
-                                 'sta' in current_iface or 'wwan' in current_iface)))
-                if is_uplink:
-                    dbg('[ssid] Detected via iw dev (%s, %s): %r' % (
-                        current_iface, current_type, ssid))
-                    sta_ssid = ssid
+        for _iface, _ssid, _itype in _iface_blocks:
+            if not _ssid:
+                continue
+            if first_ssid is None:
+                first_ssid = _ssid
+            if _itype == 'managed' or ('sta' in _iface or 'wwan' in _iface):
+                dbg('[ssid] Detected via iw dev (%s, %s): %r' % (_iface, _itype, _ssid))
+                sta_ssid = _ssid
+                break   # prefer first managed interface found
+
         if sta_ssid:
             return sta_ssid
         if first_ssid:
