@@ -396,20 +396,42 @@ class _BoundHTTPHandler(urllib.request.HTTPHandler):
 
     def _make_conn(self, host, **kwargs):
         import http.client as _hc, socket as _sock
-        conn = _hc.HTTPConnection(host, **kwargs)
-        # Patch connect() to bind before connecting
         _iface = self._iface
-        _orig_connect = conn.connect
-        def _bound_connect():
-            _orig_connect()
-            try:
-                import socket as _s
-                conn.sock.setsockopt(
-                    _s.SOL_SOCKET, _s.SO_BINDTODEVICE, _iface + bytes(1))
-            except Exception:
-                pass   # non-fatal: falls back to default routing
-        conn.connect = _bound_connect
-        return conn
+
+        class _BoundConnection(_hc.HTTPConnection):
+            def connect(self):
+                # Resolve host ourselves (mirrors socket.create_connection),
+                # but bind SO_BINDTODEVICE *before* connect() — doing it after
+                # connect() is a no-op, since routing is already decided.
+                err = None
+                sock = None
+                for res in _sock.getaddrinfo(self.host, self.port, 0, _sock.SOCK_STREAM):
+                    af, socktype, proto, _canon, sa = res
+                    try:
+                        sock = _sock.socket(af, socktype, proto)
+                        try:
+                            sock.setsockopt(
+                                _sock.SOL_SOCKET, _sock.SO_BINDTODEVICE,
+                                _iface + bytes(1))
+                        except OSError as e:
+                            dbg('SO_BINDTODEVICE failed for %s: %r' % (_iface, e))
+                        if self.timeout is not _sock._GLOBAL_DEFAULT_TIMEOUT:
+                            sock.settimeout(self.timeout)
+                        sock.connect(sa)
+                        err = None
+                        break
+                    except OSError as e:
+                        err = e
+                        if sock is not None:
+                            sock.close()
+                            sock = None
+                if err is not None:
+                    raise err
+                self.sock = sock
+                if self._tunnel_host:
+                    self._tunnel()
+
+        return _BoundConnection(host, **kwargs)
 
 
 # Active uplink interface — detected once at startup
@@ -639,8 +661,8 @@ def detect_portal():
                 return fu, html
             if e.code == 204:
                 return None, None
-        except Exception:
-            pass
+        except Exception as e:
+            log('[detect] Exception on %s: %r' % (probe, e))
     log('[detect] All probes failed')
     return None, None
 
