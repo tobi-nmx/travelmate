@@ -1,0 +1,266 @@
+# magic.d/marinawifi.py — MarinaWiFi / Antlabs IG captive portal handler
+# ─────────────────────────────────────────────────────────────────────────────
+# Covers Antlabs IG portals hosted on cp.marinawifi.it.
+# The login flow involves two servers:
+#
+#   cp.marinawifi.it  (cloud portal, 10.50.0.20)
+#     Step 1: GET  portal URL  →  JS browser-check redirect (+&_browser=1)
+#     Step 2: GET  +_browser=1  →  login form (with anti-autofill decoys)
+#     Step 3: POST credentials  →  "Anmeldung wird durchgeführt" page +
+#                                   relay form (all-hidden, setTimeout 5s)
+#
+#   captiveportal-login.marinadivenezia.it  (AP backend, 10.60.0.101)
+#     Step 4: POST relay form  →  302 to mymarinapp.it  →  MAC authorized
+#
+# The AP backend is only reachable after cp.marinawifi.it has registered the
+# MAC with the AP firewall.  This takes a few seconds after Step 3, so Step 4
+# is retried with increasing delays until it succeeds or times out.
+#
+# Credentials: username + password (from script_args or credentials file)
+# ─────────────────────────────────────────────────────────────────────────────
+
+PRIORITY = 20   # after bahn.py (10), before generic (50)
+
+_ctx = {}
+
+
+def can_handle(portal_url, html):
+    ul = portal_url.lower()
+    h  = (html or '').lower()
+    return 'marinawifi' in ul or 'marinawifi' in h or 'cp.marinawifi.it' in ul
+
+
+def handle(portal_url, html, ticket=None, username=None, password=None):
+    log          = _ctx['log']
+    dbg          = _ctx['dbg']
+    http_get     = _ctx['http_get']
+    http_post    = _ctx['http_post']
+    _make_opener = _ctx['_make_opener']
+    _connectivity_ok = _ctx['_connectivity_ok']
+    urllib_parse = _ctx['urllib_parse']
+    time         = _ctx['time']
+
+    import re as _re
+    import html as _html_mod
+
+    log('[MarinaWiFi] Starting login')
+
+    opener, jar = _make_opener()
+
+    # ── Step 1+2: follow browser-check redirect if needed ────────────────────
+    # detect_portal() already follows the first JS redirect, so portal_url
+    # should already contain &_browser=1.  If not, follow it now.
+    if '_browser=1' not in portal_url:
+        body1, fu1, _ = http_get(portal_url, opener=opener,
+                                 _dbg_label='marinawifi_browser_check')
+        redirect = _extract_redirect_url(body1, fu1, _html_mod, urllib_parse)
+        if redirect and redirect != fu1:
+            log('[MarinaWiFi] Following browser-check redirect')
+            html, portal_url, _ = http_get(redirect, opener=opener,
+                                           _dbg_label='marinawifi_login_form')
+        else:
+            html, portal_url = body1, fu1
+    # else: html is already the login form page from detect_portal()
+
+    # ── Step 3: POST credentials ─────────────────────────────────────────────
+    # Parse the login form and fill credentials, skipping decoy password fields.
+    form = _find_login_form(html)
+    if not form:
+        log('[MarinaWiFi] Login form not found')
+        return False
+
+    action = urllib_parse.urljoin(portal_url, form['action'])
+    data   = _fill(form, username, password)
+    log('[MarinaWiFi] Posting credentials to %s' % action)
+    body2, fu2, _ = http_post(action, data, opener=opener,
+                              extra_headers={'Referer': portal_url},
+                              _dbg_label='marinawifi_credentials')
+
+    if not body2:
+        log('[MarinaWiFi] Credential POST failed')
+        return False
+
+    # ── setTimeout wait ───────────────────────────────────────────────────────
+    # The response page contains setTimeout('...submit()', 5000) which gives
+    # the cloud portal time to register the MAC with the AP firewall.
+    m = _re.search(r'setTimeout\s*\([^,]+,\s*(\d+(?:\s*\*\s*\d+)?)\s*\)', body2)
+    js_delay = 5000
+    if m:
+        expr = m.group(1).replace(' ', '')
+        try:
+            js_delay = int(expr) if '*' not in expr else (
+                lambda p: int(p[0]) * int(p[1]))(expr.split('*', 1))
+        except ValueError:
+            pass
+    log('[MarinaWiFi] Waiting %gs for AP MAC registration' % (js_delay / 1000.0))
+    time.sleep(js_delay / 1000.0)
+
+    # ── Step 4: POST relay form with retries ──────────────────────────────────
+    # Parse the relay form from the credential POST response.
+    relay = _find_relay_form(body2)
+    if not relay:
+        log('[MarinaWiFi] Relay form not found — checking connectivity directly')
+        return _connectivity_ok(opener)
+
+    relay_action = urllib_parse.urljoin(fu2, relay['action'])
+    relay_data   = {n: f['value'] for n, f in relay['fields'].items()}
+    log('[MarinaWiFi] Relay action: %s' % relay_action)
+
+    # The relay action URL uses a hostname (e.g. captiveportal-login.*)
+    # that the AP resolves via DNS hijacking to the router IP while the MAC
+    # is not yet authorized.  Resolve the real IP now via a DNS lookup that
+    # bypasses the hijacked DNS, then replace the hostname in the URL so the
+    # POST reaches the real AP backend directly.
+    relay_action = _ctx.get('_resolve_url_host', lambda u: u)(relay_action)
+
+    # Retry the relay POST: the AP firewall rule may take a few seconds to
+    # propagate after cp.marinawifi.it registers the MAC.
+    for attempt, extra_wait in enumerate([0, 3, 5, 8, 10], 1):
+        if extra_wait:
+            log('[MarinaWiFi] Relay POST attempt %d — waiting %ds' % (attempt, extra_wait))
+            time.sleep(extra_wait)
+        else:
+            log('[MarinaWiFi] Relay POST attempt %d' % attempt)
+
+        body3, fu3, resp3 = http_post(relay_action, relay_data, opener=opener,
+                                      extra_headers={'Referer': fu2},
+                                      _dbg_label='marinawifi_relay_%d' % attempt)
+
+        if body3 is None:
+            dbg('[MarinaWiFi] Relay POST failed (network error)')
+            continue
+
+        # Success: server redirects to the destination URL (not an error page)
+        import urllib.error as _ue
+        if isinstance(resp3, _ue.HTTPError) and resp3.code == 404:
+            dbg('[MarinaWiFi] 404 — AP not yet reachable (DNS hijack still active)')
+            continue
+
+        log('[MarinaWiFi] Relay POST response URL: %s' % fu3)
+        # Any non-error response means the AP accepted the relay
+        break
+    else:
+        log('[MarinaWiFi] Relay POST failed after all retries')
+        # Fall through to connectivity check anyway — MAC may still be registered
+
+    # ── Connectivity check ────────────────────────────────────────────────────
+    for attempt, delay in enumerate([1, 2, 3, 5, 5], 1):
+        time.sleep(delay)
+        log('[MarinaWiFi] Connectivity check %d/5 ...' % attempt)
+        if _connectivity_ok(opener):
+            return True
+
+    log('[MarinaWiFi] Login failed — not online after all retries')
+    return False
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _extract_redirect_url(html, base_url, _html_mod, urllib_parse):
+    import re as _re
+    if not html:
+        return None
+    m = _re.search(r'location\.href\s*=\s*["\']([^"\']+)["\']', html)
+    if m:
+        return urllib_parse.urljoin(base_url,
+               _html_mod.unescape(m.group(1)).replace('\\/', '/'))
+    m = _re.search(r'<meta[^>]+http-equiv=["\']?refresh["\']?[^>]+'
+                   r'content=["\']?\d+;\s*url=["\']?([^"\'>\s]+)["\']?',
+                   html, _re.I)
+    if m:
+        return urllib_parse.urljoin(base_url,
+               _html_mod.unescape(m.group(1).strip('"|\'')))
+    return None
+
+
+def _find_login_form(html):
+    """Return the form with a visible password field (the real login form)."""
+    import re as _re
+    # Find all <form>...</form> blocks
+    for m in _re.finditer(r'<form([^>]*)>(.*?)</form>', html, _re.I | _re.S):
+        attrs_str, body = m.group(1), m.group(2)
+        action = (_re.search(r'action=["\']([^"\']+)["\']', attrs_str) or
+                  _re.search(r'action=(\S+)', attrs_str))
+        action = action.group(1) if action else ''
+        fields = {}
+        for fi in _re.finditer(r'<input([^>]*)>', body, _re.I):
+            fa = fi.group(1)
+            name  = (_re.search(r'\bname=["\']([^"\']+)["\']', fa) or
+                     _re.search(r'\bname=(\S+)', fa))
+            typ   = (_re.search(r'\btype=["\']([^"\']+)["\']', fa) or
+                     _re.search(r'\btype=(\S+)', fa))
+            val   = (_re.search(r'\bvalue=["\']([^"\']*)["\']', fa) or
+                     _re.search(r'\bvalue=(\S*)', fa))
+            if not name:
+                continue
+            fields[name.group(1)] = {
+                'type':  (typ.group(1).lower() if typ else 'text'),
+                'value': (val.group(1) if val else ''),
+            }
+        # Login form has at least one visible (non-hidden) password field
+        has_visible_pw = any(
+            f['type'] == 'password' and f['value'] == ''
+            for f in fields.values()
+        )
+        if has_visible_pw:
+            return {'action': action, 'fields': fields}
+    return None
+
+
+def _find_relay_form(html):
+    """Return the all-hidden relay form (no visible input fields)."""
+    import re as _re
+    for m in _re.finditer(r'<form([^>]*)>(.*?)</form>', html, _re.I | _re.S):
+        attrs_str, body = m.group(1), m.group(2)
+        action = (_re.search(r'action=["\']([^"\']+)["\']', attrs_str) or
+                  _re.search(r'action=(\S+)', attrs_str))
+        action = action.group(1) if action else ''
+        fields = {}
+        has_visible = False
+        for fi in _re.finditer(r'<input([^>]*)>', body, _re.I):
+            fa = fi.group(1)
+            name = (_re.search(r'\bname=["\']([^"\']+)["\']', fa) or
+                    _re.search(r'\bname=(\S+)', fa))
+            typ  = (_re.search(r'\btype=["\']([^"\']+)["\']', fa) or
+                    _re.search(r'\btype=(\S+)', fa))
+            val  = (_re.search(r'\bvalue=["\']([^"\']*)["\']', fa) or
+                    _re.search(r'\bvalue=(\S*)', fa))
+            if not name:
+                continue
+            t = typ.group(1).lower() if typ else 'text'
+            if t not in ('hidden', 'submit'):
+                has_visible = True
+            fields[name.group(1)] = {
+                'type':  t,
+                'value': (val.group(1) if val else ''),
+            }
+        if not has_visible and fields and action:
+            return {'action': action, 'fields': fields}
+    return None
+
+
+def _fill(form, username, password):
+    """Fill form data, skipping decoy password fields."""
+    data = {}
+    has_empty_pw = any(
+        f['type'] == 'password' and f['value'] == ''
+        for f in form['fields'].values()
+    )
+    for name, field in form['fields'].items():
+        t, v = field['type'], field['value']
+        if t == 'hidden':
+            data[name] = v
+        elif t == 'submit':
+            if v and not data.get('_submit_done'):
+                data[name] = v
+                data['_submit_done'] = True
+        elif t == 'password':
+            if has_empty_pw and v:
+                continue   # decoy field
+            data[name] = password or ''
+        elif any(x in name.lower() for x in ('user', 'email', 'login', 'mail')):
+            data[name] = username or v
+        else:
+            data[name] = v
+    data.pop('_submit_done', None)
+    return data
