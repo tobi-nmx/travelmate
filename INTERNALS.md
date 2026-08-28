@@ -452,6 +452,32 @@ interface in `/tmp/trm_runtime.json` varies across Travelmate versions. The
 script tries `sta_iface`, `travelmate_iface`, and `iface` in order, then falls
 back to scanning `ip route` for a `sta*` or `wwan*` interface.
 
+**AJAX/JSON-RPC-only portals** — some portals (e.g. Teledata WLAN Hotspot) are
+not HTML-form portals at all, but instead serve AJAX APIs that exchange JSON
+over HTTP POST. These portals cannot be handled by the generic form handler,
+which scrapes HTML for form fields. Symptoms: empty/relative form `action`
+attributes, or fields only populated by JavaScript after page load. These require
+dedicated plugins. Common gotchas:
+  - Request-body encoding: some AJAX APIs wrap the JSON in a form-encoded
+    parameter, e.g. `request=<urlencoded-JSON>` (not raw JSON)
+  - Session initialization: some require a MAC-bind or device-registration step
+    before the main login API works, or they bounce between HTTP and HTTPS
+    (e.g. `http://root → https://cms → http://root`); these hops must be
+    followed before the login form is available
+
+**Name-based virtual hosting + DNS hijacking** — a problematic combination that
+occurs when a portal-internal hostname (only resolvable via WLAN DNS) is served
+by name-based Apache vhosts. `_resolve_url_host()` in the generic handler
+substitutes a resolved IP directly into the request URL as a quick fix, but this
+breaks name-based vhosts: the Host header and TLS SNI no longer match the vhost
+name, causing Apache to serve a default/fallback site (often an empty or generic
+stub page). Plugins can work around this by temporarily patching
+`socket.getaddrinfo()` for each request, keeping the real hostname in all URLs
+but redirecting only the socket connection to the WLAN-DNS-resolved IP. This
+preserves the Host header, TLS SNI, and certificate-hostname validation without
+disabling SSL verification. See `magic.d/teledata.py` for an example.
+
+
 ---
 
 ## Debugging unknown portals
